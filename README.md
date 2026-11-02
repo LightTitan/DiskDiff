@@ -14,13 +14,34 @@ developed and tested on macOS.
 | `engine` (`diskdiff-engine`) | Scanner, snapshot store, diffs, insights |
 | `app` (`diskdiff`) | The window: graph, comparison summary, column browser, insights, manage scans |
 
+## Installing
+
+Download the DMG from [Releases](https://github.com/LightTitan/DiskDiff/releases) and drag
+DiskDiff into Applications. One build runs on both Apple silicon and Intel Macs.
+
+The app is not notarized by Apple, so macOS blocks it the first time. Open it once, then go to
+System Settings → Privacy & Security and click **Open Anyway**. Or clear the download flag
+in Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/DiskDiff.app
+```
+
+To scan the whole disk, add DiskDiff under System Settings → Privacy & Security → Full Disk
+Access. Each release is signed ad hoc, so macOS may treat an update as a different app: if
+scans lose access after updating, remove DiskDiff from that list and add it again.
+
 ## Running
 
 ```sh
 cargo run -p diskdiff                 # debug
 ./build.sh                            # release DiskDiff.app in target/ (--debug, --open, --install)
+./build.sh --universal --dmg          # what a release ships: Apple silicon + Intel, packaged as a DMG
 open target/DiskDiff.app
 ```
+
+`--universal` needs the Intel and Apple silicon standard libraries
+(`rustup target add x86_64-apple-darwin aarch64-apple-darwin`).
 
 Use the bundle for real full-disk scans. macOS grants Full Disk Access per app; a bare
 binary started from a terminal borrows the terminal's permissions and may trigger privacy
@@ -86,6 +107,16 @@ Development hooks (environment variables, see `app/src/dev.rs`):
 - `DISKDIFF_MOUSE="d:40,520 m:40,600 u:40,600"`: replay mouse steps in window points (`d` press, `m` move held, `u` release, `h` hover, `c` click, `w:ms` wait).
 - `DISKDIFF_PRINT_CLOUD=/abs/path`: print live cloud sizes of a folder's entries and quit. Launch the bundle with `open -n --env … --stdout out.txt target/DiskDiff.app` so it runs with the app's own permissions.
 - `DISKDIFF_SCROLL="700,800:4,-18*25"`: replay a trackpad gesture at a window point (dx, dy per event, event count). Prefix the step with `L` for mouse-wheel lines and `S` for Shift, e.g. `700,800:LS0,3*4`.
+
+### Releasing
+
+1. Bump `version` in the root `Cargo.toml` and commit.
+2. Tag the commit and push the tag, e.g. `git tag v0.2.2 && git push origin v0.2.2`.
+3. The Release workflow builds the universal DMG on GitHub and attaches it to a draft
+   release. Write the notes there and publish it.
+
+The workflow stops if the tag doesn't match the version in `Cargo.toml`. It can also be
+started by hand from the Actions tab, which drafts a release for the current version.
 
 UI conventions are in [CLAUDE.md](CLAUDE.md). The short version: the arrow cursor on every control,
 the pointing hand only for links, and no all-caps labels.

@@ -5,8 +5,10 @@
 #   ./build.sh --debug    debug build (faster to compile, slower to run)
 #   ./build.sh --open     build, then launch the app
 #   ./build.sh --install  build, then copy it to /Applications (replacing an older copy)
+#   ./build.sh --universal  one binary for Apple silicon and Intel, as releases ship
+#   ./build.sh --dmg      also package the app as target/DiskDiff_<version>_<arch>.dmg
 #
-# Flags combine, e.g. `./build.sh --install --open`.
+# Flags combine, e.g. `./build.sh --install --open` or `./build.sh --universal --dmg`.
 #
 # A real bundle matters on macOS: Full Disk Access is granted per app, and a
 # bare binary launched from a terminal borrows the terminal's permissions.
@@ -16,29 +18,53 @@ cd "$(dirname "$0")"
 profile=release
 open_app=false
 install=false
+universal=false
+dmg=false
 for arg in "$@"; do
   case $arg in
     --debug) profile=debug ;;
     --open) open_app=true ;;
     --install) install=true ;;
-    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --universal) universal=true ;;
+    --dmg) dmg=true ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (see --help)" >&2; exit 1 ;;
   esac
 done
 
+cargo_flags=(-p diskdiff)
+[[ $profile == release ]] && cargo_flags+=(--release)
+
 if [[ $(uname) != Darwin ]]; then
   # No bundle outside macOS; the binary is the app.
-  if [[ $profile == release ]]; then cargo build --release -p diskdiff; else cargo build -p diskdiff; fi
+  cargo build $cargo_flags
   echo "built target/$profile/diskdiff"
   exit 0
 fi
 
-if [[ $profile == release ]]; then cargo build --release -p diskdiff; else cargo build -p diskdiff; fi
+if $universal; then
+  targets=(aarch64-apple-darwin x86_64-apple-darwin)
+  for t in $targets; do
+    if [[ ! -d $(rustc --print target-libdir --target $t) ]]; then
+      echo "no Rust standard library for $t (with rustup: rustup target add $t)" >&2
+      exit 1
+    fi
+  done
+  for t in $targets; do cargo build $cargo_flags --target $t; done
+  bin=target/universal/$profile/diskdiff
+  mkdir -p "${bin:h}"
+  lipo -create -output "$bin" target/${^targets}/$profile/diskdiff
+  arch=universal
+else
+  cargo build $cargo_flags
+  bin=target/$profile/diskdiff
+  arch=$(uname -m)
+fi
 
 APP=target/DiskDiff.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "target/$profile/diskdiff" "$APP/Contents/MacOS/DiskDiff"
+cp "$bin" "$APP/Contents/MacOS/DiskDiff"
 cp app/icon/DiskDiff.icns "$APP/Contents/Resources/DiskDiff.icns"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -75,7 +101,19 @@ PLIST
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1
 # Make Finder and the Dock pick up a changed icon instead of a cached one.
 touch "$APP"
-echo "built $APP ($profile, v$VERSION)"
+echo "built $APP ($profile, $arch, v$VERSION)"
+
+if $dmg; then
+  # The usual drag-to-install window: the app next to a link to /Applications.
+  DMG=target/DiskDiff_${VERSION}_${arch}.dmg
+  stage=$(mktemp -d)
+  ditto "$APP" "$stage/DiskDiff.app"
+  ln -s /Applications "$stage/Applications"
+  rm -f "$DMG"
+  hdiutil create -quiet -volname DiskDiff -srcfolder "$stage" -format UDZO -ov "$DMG"
+  rm -rf "$stage"
+  echo "packaged $DMG"
+fi
 
 if $install; then
   dest=/Applications/DiskDiff.app
