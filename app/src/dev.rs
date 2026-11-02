@@ -117,7 +117,7 @@ pub fn hooks<V: 'static>(window: WindowHandle<V>, state: Entity<AppState>, cx: &
     if let Ok(spec) = std::env::var("DISKDIFF_MOUSE") {
         // Space-separated steps in window points: `d:x,y` press, `m:x,y`
         // move with the button held, `h:x,y` hover, `u:x,y` release,
-        // `c:x,y` click, `w:ms` wait.
+        // `c:x,y` click, `dc:x,y` double-click, `w:ms` wait.
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(1500)).await;
             for step in spec.split_whitespace() {
@@ -133,15 +133,16 @@ pub fn hooks<V: 'static>(window: WindowHandle<V>, state: Entity<AppState>, cx: &
                 let at = point(px(n[0]), px(n[1]));
                 let left = MouseButton::Left;
                 let mods = Modifiers::default();
-                let down = || MouseDownEvent { button: left, position: at, modifiers: mods, click_count: 1, first_mouse: false }.to_platform_input();
-                let up = || MouseUpEvent { button: left, position: at, modifiers: mods, click_count: 1 }.to_platform_input();
+                let down = |n| MouseDownEvent { button: left, position: at, modifiers: mods, click_count: n, first_mouse: false }.to_platform_input();
+                let up = |n| MouseUpEvent { button: left, position: at, modifiers: mods, click_count: n }.to_platform_input();
                 let moved = |held| MouseMoveEvent { position: at, pressed_button: held, modifiers: mods }.to_platform_input();
                 let events = match op {
-                    "d" => vec![down()],
-                    "u" => vec![up()],
+                    "d" => vec![down(1)],
+                    "u" => vec![up(1)],
                     "m" => vec![moved(Some(left))],
                     "h" => vec![moved(None)],
-                    "c" => vec![moved(None), down(), up()],
+                    "c" => vec![moved(None), down(1), up(1)],
+                    "dc" => vec![moved(None), down(1), up(1), down(2), up(2)],
                     _ => vec![],
                 };
                 for e in events {

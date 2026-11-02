@@ -30,6 +30,7 @@ use gpui_kit::*;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant};
@@ -41,6 +42,10 @@ const MAX_W: f32 = 900.;
 const LANE: f32 = 12.;
 const NEAR: f32 = 18.;
 const GUTTER: f32 = 10.;
+/// Room a row's name keeps before its extra figures shrink to "…" pills.
+const NAME_MIN: f32 = 72.;
+/// Width of a figure shrunk to a "…" pill.
+const PILL_W: f32 = 20.;
 const PREVIEW_W: f32 = 280.;
 const MB: u64 = 1_000_000;
 const GB: u64 = 1_000_000_000;
@@ -623,6 +628,18 @@ impl Browser {
         cx.notify();
     }
 
+    /// Widens a column to `w` (never narrows it), e.g. so a row's "…" pills
+    /// show their figures.
+    fn widen(&mut self, col: usize, w: f32, cx: &mut Context<Self>) {
+        let w = w.clamp(MIN_W, MAX_W).max(self.width(col));
+        if self.widths.len() <= col {
+            self.widths.resize(col + 1, DEFAULT_W);
+        }
+        self.widths[col] = w;
+        self.ensure_visible(col);
+        cx.notify();
+    }
+
     /// Width that fits the longest name in a column.
     fn fit_width(&self, col: usize, cx: &App) -> f32 {
         let Some(c) = self.columns.get(col) else { return DEFAULT_W };
@@ -817,6 +834,7 @@ impl Browser {
         let Some(c) = self.columns.get(col) else { return Vec::new() };
         let selected_ix = self.selected_index(col);
         let is_last = col + 1 == self.chain.len();
+        let (width, this) = (self.width(col), cx.entity());
         range
             .filter_map(|ix| {
                 let it = c.items.get(ix)?;
@@ -825,7 +843,7 @@ impl Browser {
                 let activity = c.activity.get(&it.name).copied();
                 let pending = c.activity_pending && it.is_dir && it.status == Status::Changed && activity.is_none();
                 Some(
-                    row(it, ix, col, selected, open, focused, comparing, activity, pending, c.cloud.get(&*it.name).copied(), &self.state, &p)
+                    row(it, ix, col, width, selected, open, focused, comparing, activity, pending, c.cloud.get(&*it.name).copied(), &this, &self.state, &p)
                         .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                             window.focus(&this.focus, cx);
                             this.select(col, ix, cx);
@@ -1260,6 +1278,7 @@ fn row(
     it: &Item,
     ix: usize,
     col: usize,
+    width: f32,
     selected: bool,
     open: bool,
     focused: bool,
@@ -1267,6 +1286,7 @@ fn row(
     activity: Option<u64>,
     pending: bool,
     cloud_size: Option<CloudSize>,
+    browser: &Entity<Browser>,
     state: &Entity<AppState>,
     p: &Palette,
 ) -> Stateful<Div> {
@@ -1296,16 +1316,13 @@ fn row(
     };
     let icon_color = if on_sel { p.on_selected } else if removed { p.faint } else { icon_color };
     let delta = it.change();
-
-    // Folder churn: only when it says more than the net delta does. Moved
-    // bytes already show in grey, so they don't count as churn.
-    let churn = activity.map(|a| a.saturating_sub(it.moved_bytes.unsigned_abs())).filter(|&a| {
-        let d = delta.unsigned_abs();
-        comparing && it.is_dir && a >= MB && (d == 0 || (a as f64 >= 1.25 * d as f64 && a - d >= MB))
-    });
-    // Churn that dwarfs the net delta (e.g. ⇅ 27 GB behind −4 GB) means far
-    // more happened than the coloured number says, so it stands out.
-    let loud = churn.is_some_and(|a| a >= GB && a >= 3 * delta.unsigned_abs());
+    let cloud = cloud_badge(it, cloud_size, ix, on_sel, p);
+    let fit = row_fit(it, width, comparing, activity, pending, cloud.is_some());
+    let (churn, loud) = (fit.churn, fit.loud);
+    let widen = {
+        let (browser, w) = (browser.clone(), fit.all_w);
+        Rc::new(move |cx: &mut App| browser.update(cx, |b, cx| b.widen(col, w, cx)))
+    };
 
     let delta_el: Option<AnyElement> = comparing.then(|| match it.status {
         Status::NoHistory => div()
@@ -1323,16 +1340,28 @@ fn row(
             })
             .into_any_element(),
         _ => {
-            let real = div()
-                .text_color(if on_sel { p.on_selected } else { p.delta(delta, it.status == Status::Added) })
-                .child(format::delta(delta));
+            let color = if on_sel { p.on_selected } else { p.delta(delta, it.status == Status::Added) };
+            let real = if fit.full_delta {
+                div().text_color(color).child(format::delta(delta)).into_any_element()
+            } else {
+                let tip = format!("Net change: {}", format::delta(delta));
+                collapsed(("delta-pill", ix), tip, color, if on_sel { p.on_selected.opacity(0.2) } else { p.border }, widen.clone())
+            };
             div()
                 .flex()
                 .gap(px(6.))
                 .when_some(it.moved.as_ref().filter(|m| !m.label.is_empty()), |el, m| el.child(moved_link(m, ix, on_sel, sub, state, p)))
                 // Bytes that came from or went to another folder: grey, so
                 // the coloured number is only what was added or freed.
-                .when(it.moved.is_none() && it.moved_bytes != 0, |el| el.child(div().text_color(sub).child(format::delta(it.moved_bytes))))
+                .when(it.moved.is_none() && it.moved_bytes != 0, |el| {
+                    let text = format::delta(it.moved_bytes);
+                    el.child(if fit.full_moved {
+                        div().text_color(sub).child(text).into_any_element()
+                    } else {
+                        let tip = format!("{text} moved to or from other folders");
+                        collapsed(("moved-pill", ix), tip, sub, if on_sel { p.on_selected.opacity(0.2) } else { p.border }, widen.clone())
+                    })
+                })
                 .child(real)
                 .into_any_element()
         }
@@ -1367,30 +1396,31 @@ fn row(
         )
         .when(pending, |el| el.child(spinner(sub, 10.)))
         .when_some(churn, |el, a| {
+            let tip = if loud {
+                format!("Total changed inside this folder: {}, far more than its net change", format::bytes(a))
+            } else {
+                format!("Total changed inside this folder: {}", format::bytes(a))
+            };
+            let (color, bg) = match (on_sel, loud) {
+                (true, _) => (p.on_selected, p.on_selected.opacity(0.2)),
+                (false, true) => (p.churn, p.churn_bg),
+                (false, false) => (sub, p.border),
+            };
+            if !fit.full_churn {
+                return el.child(div().flex_shrink_0().text_size(px(11.)).child(collapsed(("churn-pill", ix), tip, color, bg, widen.clone())));
+            }
             el.child(
                 div()
                     .id(("churn", ix))
                     .flex_shrink_0()
                     .text_size(px(11.))
                     .text_color(sub)
-                    .when(loud, |el| {
-                        el.px(px(5.))
-                            .rounded(px(4.))
-                            .text_color(if on_sel { p.on_selected } else { p.churn })
-                            .bg(if on_sel { p.on_selected.opacity(0.2) } else { p.churn_bg })
-                    })
+                    .when(loud, |el| el.px(px(5.)).rounded(px(4.)).text_color(color).bg(bg))
                     .child(format!("⇅ {}", format::bytes(a)))
-                    .tooltip(move |w, cx| {
-                        let tip = if loud {
-                            format!("Total changed inside this folder: {}, far more than its net change", format::bytes(a))
-                        } else {
-                            format!("Total changed inside this folder: {}", format::bytes(a))
-                        };
-                        gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx)
-                    }),
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
             )
         })
-        .when_some(cloud_badge(it, cloud_size, ix, on_sel, p), |el, b| el.child(b))
+        .when_some(cloud, |el, b| el.child(b))
         .when_some(delta_el, |el, d| el.child(div().flex_shrink_0().text_size(px(11.)).child(d)))
         .child(
             div()
@@ -1409,6 +1439,91 @@ fn row(
                 .justify_end()
                 .when(it.is_dir, |el| el.child(icon(IconName::ChevronRight, 12., sub))),
         )
+}
+
+/// How a row's figures fit its column. The name keeps its width, up to
+/// [`NAME_MIN`]; past that the grey moved bytes, then the churn, then the
+/// net change shrink to "…" pills. Widths are estimated from the text (11 px digits are about 6.3 px wide, 12 px
+/// name letters about 6.2).
+struct RowFit {
+    /// Folder churn worth showing, and whether it dwarfs the net change.
+    churn: Option<u64>,
+    loud: bool,
+    full_churn: bool,
+    full_moved: bool,
+    full_delta: bool,
+    /// Column width that shows the whole name and every figure.
+    all_w: f32,
+}
+
+fn row_fit(it: &Item, width: f32, comparing: bool, activity: Option<u64>, pending: bool, cloud: bool) -> RowFit {
+    let delta = it.change();
+    // Folder churn: only when it says more than the net delta does. Moved
+    // bytes already show in grey, so they don't count as churn.
+    let churn = activity.map(|a| a.saturating_sub(it.moved_bytes.unsigned_abs())).filter(|&a| {
+        let d = delta.unsigned_abs();
+        comparing && it.is_dir && a >= MB && (d == 0 || (a as f64 >= 1.25 * d as f64 && a - d >= MB))
+    });
+    // Churn that dwarfs the net delta (e.g. ⇅ 27 GB behind −4 GB) means far
+    // more happened than the coloured number says, so it stands out.
+    let loud = churn.is_some_and(|a| a >= GB && a >= 3 * delta.unsigned_abs());
+
+    let est = |s: &str| s.chars().count() as f32 * 6.3;
+    let mut fixed = 2. * 8. + 15. + 58. + 10. + 3. * 6.;
+    if pending {
+        fixed += 10. + 6.;
+    }
+    if cloud {
+        fixed += 60. + 6.;
+    }
+    let (mut moved_w, mut real_w) = (0., 0.);
+    if comparing {
+        if !matches!(it.status, Status::NoHistory | Status::Unreadable) {
+            real_w = est(&format::delta(delta)) + 6.;
+        }
+        match it.moved.as_ref() {
+            Some(m) if !m.label.is_empty() => fixed += est(&m.label) + est("from ") + 6.,
+            Some(_) => {}
+            None if it.moved_bytes != 0 => moved_w = est(&format::delta(it.moved_bytes)) + 6.,
+            None => {}
+        }
+    }
+    let churn_w = churn.map_or(0., |a| est(&format!("⇅ {}", format::bytes(a))) + if loud { 10. } else { 0. } + 6.);
+    let pill = |w: f32| if w > 0. { PILL_W + 6. } else { 0. };
+    let name_w = it.name.chars().count() as f32 * 6.2 + 2.;
+    // The row sits inside the column's gutters.
+    let room = width - 2. * GUTTER - 4. - fixed - name_w.min(NAME_MIN);
+    RowFit {
+        churn,
+        loud,
+        full_moved: room >= real_w + churn_w + moved_w,
+        full_churn: room >= real_w + churn_w + pill(moved_w),
+        full_delta: room >= real_w + pill(churn_w) + pill(moved_w),
+        all_w: 2. * GUTTER + 4. + fixed + real_w + churn_w + moved_w + name_w,
+    }
+}
+
+/// A figure with no room in its row, shrunk to a "…" pill. Hovering shows
+/// the figure; double-clicking widens the column so it shows in full.
+fn collapsed(id: impl Into<ElementId>, tip: String, color: Hsla, bg: Hsla, widen: Rc<dyn Fn(&mut App)>) -> AnyElement {
+    let tip: SharedString = format!("{tip}. Double-click to widen the column.").into();
+    div()
+        .id(id)
+        .w(px(PILL_W))
+        .flex()
+        .justify_center()
+        .rounded(px(4.))
+        .text_color(color)
+        .bg(bg)
+        .child("…")
+        .on_click(move |e: &ClickEvent, _, cx| {
+            if e.click_count() == 2 {
+                cx.stop_propagation();
+                widen(cx);
+            }
+        })
+        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+        .into_any_element()
 }
 
 /// "from Downloads" / "to Projects": the other end of a moved item, as a

@@ -104,7 +104,7 @@ Development hooks (environment variables, see `app/src/dev.rs`):
 - `DISKDIFF_KEYS="down right l"`: replay keystrokes.
 - `DISKDIFF_ACTION=diskdiff::About`: dispatch an action by name, e.g. a menu command.
 - `DISKDIFF_PRINT_MENUS=1`: print the menu bar.
-- `DISKDIFF_MOUSE="d:40,520 m:40,600 u:40,600"`: replay mouse steps in window points (`d` press, `m` move held, `u` release, `h` hover, `c` click, `w:ms` wait).
+- `DISKDIFF_MOUSE="d:40,520 m:40,600 u:40,600"`: replay mouse steps in window points (`d` press, `m` move held, `u` release, `h` hover, `c` click, `dc` double-click, `w:ms` wait).
 - `DISKDIFF_PRINT_CLOUD=/abs/path`: print live cloud sizes of a folder's entries and quit. Launch the bundle with `open -n --env … --stdout out.txt target/DiskDiff.app` so it runs with the app's own permissions.
 - `DISKDIFF_SCROLL="700,800:4,-18*25"`: replay a trackpad gesture at a window point (dx, dy per event, event count). Prefix the step with `L` for mouse-wheel lines and `S` for Shift, e.g. `700,800:LS0,3*4`.
 
