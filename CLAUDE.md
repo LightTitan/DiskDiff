@@ -19,3 +19,10 @@ hand when the element genuinely behaves like a link.
 
 ### Labels
 Sentence case everywhere. No all-caps labels.
+
+## Code conventions
+
+### Test data and examples
+The repository is public. Test fixtures, examples and demo data use generic names
+(`Project`, `app`, `Photos`, `Downloads/film.mp4`), never real folders, projects, files or
+paths from anyone's machine, even when a bug was found on a real disk.
