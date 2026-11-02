@@ -91,13 +91,15 @@ pub fn apply_moves(items: &mut [Item], abs: &Path, moves: &crate::moves::Moves) 
             continue;
         }
         it.moved_bytes = if it.has_delta() { net.get(&*it.name).copied().unwrap_or(0) } else { 0 };
+        // What left the old place moved; a folder that changed on the way
+        // shows the difference at its new place as real change.
         let found = match it.status {
-            Status::Added => moves.to(&path).map(|m| (&m.from, true)),
-            Status::Removed => moves.from(&path).map(|m| (&m.to, false)),
+            Status::Added => moves.to(&path).map(|m| (&m.from, true, m.size as i64)),
+            Status::Removed => moves.from(&path).map(|m| (&m.to, false, -(m.size as i64))),
             _ => None,
         };
-        if let Some((other, arrived)) = found {
-            it.moved_bytes = it.delta();
+        if let Some((other, arrived, bytes)) = found {
+            it.moved_bytes = bytes;
             it.moved = Some(Moved { other: other.clone(), label: Arc::from(crate::moves::label(other, &path)), arrived });
         }
     }

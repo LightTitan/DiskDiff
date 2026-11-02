@@ -23,7 +23,7 @@ use crate::theme::{ActivePalette, Palette};
 use crate::widgets::{icon, icon_button, icon_button_disabled, spinner, truncate_start};
 use diskdiff_engine::cloud::{self, CloudSize};
 use diskdiff_engine::moves::{self, Moves};
-use diskdiff_engine::{Item, Status, platform, query};
+use diskdiff_engine::{Item, ScanInfo, Status, platform, query};
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -43,6 +43,7 @@ const NEAR: f32 = 18.;
 const GUTTER: f32 = 10.;
 const PREVIEW_W: f32 = 280.;
 const MB: u64 = 1_000_000;
+const GB: u64 = 1_000_000_000;
 
 actions!(
     browser,
@@ -149,7 +150,8 @@ pub struct Browser {
     typed: String,
     typed_at: Instant,
     copied_at: Option<Instant>,
-    free: Option<(PathBuf, String)>,
+    /// Free space on the disk right now, for the probed path.
+    free: Option<(PathBuf, u64)>,
     reveal_seen: u64,
     /// Horizontal scroll to apply after the next layout (columns not laid out yet).
     pending_reveal_col: Option<usize>,
@@ -473,7 +475,7 @@ impl Browser {
             return;
         }
         if let Some(d) = platform::disk_space(&probe) {
-            self.free = Some((probe, format!("{} available", format::bytes(d.free))));
+            self.free = Some((probe, d.free));
         }
     }
 
@@ -1076,9 +1078,10 @@ impl Browser {
         };
         let delta_text = match (&item.moved, item.status) {
             (Some(m), _) => format!(
-                "Moved {} {}",
+                "Moved {} {}{}",
                 if m.arrived { "from" } else { "to" },
-                m.other.parent().map(crate::format::home_path).unwrap_or_default()
+                m.other.parent().map(crate::format::home_path).unwrap_or_default(),
+                if item.change() != 0 { format!(" · {}", format::delta(item.change())) } else { String::new() }
             ),
             (None, status) => match status {
             Status::Removed => format!("Deleted · was {}", format::bytes(item.prev.unwrap_or(0))),
@@ -1130,7 +1133,7 @@ impl Browser {
         let path_text = path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
         let copied = self.copied_at.is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
         let has_path = path.is_some();
-        let free = self.free.as_ref().map(|f| f.1.clone()).unwrap_or_default();
+        let (free, free_tip) = free_space_text(self.state.read(cx).current_scan(), self.free.as_ref().map(|f| f.1));
         let this = cx.entity();
         let (t1, t2, t3, t4) = (this.clone(), this.clone(), this.clone(), this);
         let folder = self.selected_folder();
@@ -1158,7 +1161,15 @@ impl Browser {
                     .child(truncate_start(path_text.clone(), 140))
                     .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(path_text.clone()).build(window, cx)),
             )
-            .child(div().flex_shrink_0().child(free))
+            .when_some(free, |el, free| {
+                el.child(
+                    div()
+                        .id("status-free")
+                        .flex_shrink_0()
+                        .child(free)
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(free_tip.clone()).build(window, cx)),
+                )
+            })
             .child(div().w(px(1.)).h(px(16.)).bg(p.border))
             .child(icon_button_disabled(
                 "favorite",
@@ -1184,6 +1195,29 @@ impl Browser {
             .child(icon_button("reset-widths", IconName::Columns3, "Reset column widths", move |_, cx| {
                 t3.update(cx, |this, cx| this.reset_widths(cx))
             }))
+    }
+}
+
+/// The status bar's available-space label and its tooltip. The columns show
+/// the scan, so the label leads with the space recorded with it, then what
+/// is available now. Scans that recorded no space show only now.
+fn free_space_text(scan: Option<&ScanInfo>, now: Option<u64>) -> (Option<String>, SharedString) {
+    match scan.filter(|s| s.disk_total > 0) {
+        Some(s) => {
+            let at_scan = format!("{} available at scan", format::bytes(s.disk_free));
+            let when = format::date(s.finished_at);
+            match now {
+                Some(n) => (
+                    Some(format!("{at_scan} · {} now", format::bytes(n))),
+                    format!("Available on this disk when the scan ran ({when}), and right now.").into(),
+                ),
+                None => (Some(at_scan), format!("Available on this disk when the scan ran ({when}).").into()),
+            }
+        }
+        None => (
+            now.map(|n| format!("{} available now", format::bytes(n))),
+            "Available on this disk right now. This scan didn't record available space.".into(),
+        ),
     }
 }
 
@@ -1269,6 +1303,9 @@ fn row(
         let d = delta.unsigned_abs();
         comparing && it.is_dir && a >= MB && (d == 0 || (a as f64 >= 1.25 * d as f64 && a - d >= MB))
     });
+    // Churn that dwarfs the net delta (e.g. ⇅ 27 GB behind −4 GB) means far
+    // more happened than the coloured number says, so it stands out.
+    let loud = churn.is_some_and(|a| a >= GB && a >= 3 * delta.unsigned_abs());
 
     let delta_el: Option<AnyElement> = comparing.then(|| match it.status {
         Status::NoHistory => div()
@@ -1336,9 +1373,20 @@ fn row(
                     .flex_shrink_0()
                     .text_size(px(11.))
                     .text_color(sub)
+                    .when(loud, |el| {
+                        el.px(px(5.))
+                            .rounded(px(4.))
+                            .text_color(if on_sel { p.on_selected } else { p.churn })
+                            .bg(if on_sel { p.on_selected.opacity(0.2) } else { p.churn_bg })
+                    })
                     .child(format!("⇅ {}", format::bytes(a)))
                     .tooltip(move |w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(format!("Total changed inside this folder: {}", format::bytes(a))).build(w, cx)
+                        let tip = if loud {
+                            format!("Total changed inside this folder: {}, far more than its net change", format::bytes(a))
+                        } else {
+                            format!("Total changed inside this folder: {}", format::bytes(a))
+                        };
+                        gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx)
                     }),
             )
         })

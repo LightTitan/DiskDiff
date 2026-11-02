@@ -346,7 +346,7 @@ fn snapshot(cur: &ScanInfo, others: bool, p: &Palette) -> Vec<AnyElement> {
         .items_center()
         .gap(px(6.))
         .when(cur.disk_total > 0, |el| el.child(chip(p, "Disk used", format::bytes(cur.disk_used()), None)))
-        .when(cur.disk_total > 0 && cur.disk_free > 0, |el| el.child(chip(p, "Free", format::bytes(cur.disk_free), None)))
+        .when(cur.disk_total > 0 && cur.disk_free > 0, |el| el.child(chip(p, "Available", format::bytes(cur.disk_free), None)))
         .child(chip(p, "Scanned", format::bytes(cur.size), None))
         .child(chip(p, "Files", format::count(cur.files), None))
         .child(chip(p, "Folders", format::count(cur.dirs), None));

@@ -164,7 +164,7 @@ pub fn part_name(part: Part) -> &'static str {
     match part {
         Part::Scanned => "Scanned files",
         Part::Outside => "Not scanned",
-        Part::Free => "Free",
+        Part::Free => "Available",
     }
 }
 

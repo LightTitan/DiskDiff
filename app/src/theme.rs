@@ -34,14 +34,19 @@ pub struct Palette {
     pub up: Hsla,
     pub down: Hsla,
     pub new: Hsla,
+    /// Folder activity that dwarfs the net change: the label and the pill
+    /// behind it. Violet, so it reads as neither growth nor shrinkage.
+    pub churn: Hsla,
+    pub churn_bg: Hsla,
     /// Scanned files, in the disk bar and the graph.
     ///
     /// `scanned`, `outside` and `outside_bg` are opaque and chosen per
-    /// appearance so each sits the same perceptual (OKLCH) lightness distance
-    /// from the background in both: unscanned space close to it (quiet),
-    /// scanned files far from it (strong). On dark that makes scanned files
-    /// lighter and less saturated, not darker. Translucent fills would land
-    /// at a different distance on each background and blur the two together.
+    /// appearance: scanned files are the accent blue (strong), unscanned
+    /// space quieter tints of it, close to the background. In dark mode the
+    /// tints keep real colour (in OKLCH, chroma as a share of the most the
+    /// lightness allows); dark tints with light mode's raw chroma read as
+    /// grey. Translucent fills would land at a different distance on each
+    /// background and blur the two together.
     pub scanned: Hsla,
     /// Used space that was not scanned, in the disk bar and the graph: the
     /// stripes and the legend swatch.
@@ -89,9 +94,11 @@ impl Palette {
         up: c(0xd9726f),
         down: c(0x5fb38a),
         new: c(0xd4aa5c),
-        scanned: c(0x6a8ed2),
-        outside: c(0x3f557f),
-        outside_bg: c(0x313b4e),
+        churn: c(0xc3a9f0),
+        churn_bg: c(0x3d3054),
+        scanned: c(0x4f7dd1),
+        outside: c(0x355390),
+        outside_bg: c(0x273a60),
         folder: c(0x5e93d8),
         file: c(0xa4a9b1),
         control: c(0x2d3036),
@@ -122,6 +129,8 @@ impl Palette {
         up: c(0xc4504c),
         down: c(0x2f9466),
         new: c(0xb7851f),
+        churn: c(0x7750b1),
+        churn_bg: c(0xece5fb),
         scanned: c(0x396ac6),
         outside: c(0x97b0e2),
         outside_bg: c(0xc8d4eb),

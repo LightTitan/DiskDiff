@@ -197,7 +197,7 @@ impl Workspace {
                 div().flex().items_center().gap(px(6.)).child(div().text_size(px(11.)).text_color(p.dim).child("Graph")).child(
                     segmented(
                         "metric",
-                        &["Used", "Free"],
+                        &["Used", "Available"],
                         usize::from(graph_free),
                         &[true, free_ok],
                         {

@@ -818,7 +818,18 @@ impl InsightsView {
                             .justify_end()
                             .gap(px(6.))
                             // Moved bytes in grey; the bold number is only what was added or freed.
-                            .when(c.moved_from.is_some(), |el| el.text_color(p.dim).child(format::bytes(c.size)))
+                            .when(c.moved_from.is_some(), |el| {
+                                el.child(div().text_color(p.dim).child(format::bytes(c.moved_bytes.unsigned_abs())))
+                                    // A folder that changed on the way: what it gained or lost.
+                                    .when(delta != 0, |el| {
+                                        el.child(
+                                            div()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(if delta >= 0 { p.up } else { p.down })
+                                                .child(format::delta(delta)),
+                                        )
+                                    })
+                            })
                             .when(c.moved_from.is_none(), |el| {
                                 el.when(c.moved_bytes != 0, |el| {
                                     el.child(div().text_size(px(11.)).text_color(p.dim).child(format::delta(c.moved_bytes)))

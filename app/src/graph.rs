@@ -6,12 +6,15 @@
 //!
 //! It is the only scan selector: clicking a dot makes that scan current;
 //! pressing anywhere else and dragging scrubs the compare scan, and a hollow
-//! triangle above a nearby dot sets compare in one click. The two selected
+//! triangle in the empty space next to a nearby dot (above it, or below it
+//! for free space) sets compare in one click. The two selected
 //! scans span a shaded band with the change in used space on top.
 //!
-//! With "Graph Free Space" on, the graph plots free space instead: one blue
-//! area under a line on a relative axis, since the scanned/outside split
-//! only describes used space. The pill then shows the change in free space.
+//! With "Graph Available Space" on, the graph plots free space instead: the same
+//! stack upside down. The line is free space; above it hang unscanned space
+//! (stripes) and scanned files (solid) toward the disk size, which is cut
+//! (the diagonal break at the top) when it doesn't fit. The pill then shows
+//! the change in free space.
 //!
 //! Geometry is plain `f32` math in canvas-local coordinates ([`Plot`],
 //! [`outside_stripes`]), so it is unit-tested without a window. Painting happens
@@ -57,6 +60,10 @@ const LH: f32 = 12.;
 /// Horizontal padding and height of the change pill.
 const PILL_PX: f32 = 7.;
 const PILL_H: f32 = 16.;
+/// The change pill's row: the band's 6 px overhang, a 4 px gap and the pill.
+/// It sits above the plot, or below it for free space, where the empty side
+/// of the line is.
+const PILL_ROW: f32 = 6. + 4. + PILL_H;
 /// Stripe spacing in the unscanned area.
 const STRIPE_GAP: f32 = 5.;
 
@@ -151,7 +158,9 @@ impl Rect {
 /// X positions, evenly spaced by index over `[0, w]`. When current and
 /// compare are closer than [`MIN_PAIR_GAP`], the interval between them is
 /// widened to that gap and the points on either side are compressed, so both
-/// value labels stay readable. Order never changes.
+/// value labels stay readable. Near an edge the pair is held back far enough
+/// that the points beyond it keep some room instead of piling onto the edge.
+/// Order never changes.
 fn x_positions(n: usize, w: f32, a: Option<usize>, b: Option<usize>) -> Vec<f32> {
     let natural = |i: usize| if n <= 1 { w / 2. } else { i as f32 / (n - 1) as f32 * w };
     let mut xs: Vec<f32> = (0..n).map(natural).collect();
@@ -165,8 +174,12 @@ fn x_positions(n: usize, w: f32, a: Option<usize>, b: Option<usize>) -> Vec<f32>
     if nr - nl >= gap {
         return xs;
     }
+    // Each interval outside the pair keeps at least 3/4 of an even share of
+    // the width the pair leaves.
+    let outside = (n - 1 - (r - l)) as f32;
+    let room = if outside > 0. { (w - gap).max(0.) / outside * 0.75 } else { 0. };
     let mid = (nl + nr) / 2.;
-    let tl = (mid - gap / 2.).clamp(0., (w - gap).max(0.));
+    let tl = (mid - gap / 2.).clamp(l as f32 * room, (w - gap - (n - 1 - r) as f32 * room).max(0.));
     let tr = tl + gap;
     for (i, x) in xs.iter_mut().enumerate() {
         let nx = natural(i);
@@ -243,19 +256,22 @@ fn graph_free(s: &AppState) -> bool {
     s.settings.graph_free && !h.is_empty() && h.iter().all(|x| x.disk_total > 0)
 }
 
-/// The y domain for free space: relative, with 14% padding (or a minimum
-/// pad for a flat series), then rounded to nice numbers.
-fn free_domain(values: &[u64]) -> (f64, f64) {
-    let min = values.iter().copied().min().unwrap_or(0) as f64;
-    let max = values.iter().copied().max().unwrap_or(0) as f64;
-    let span = max - min;
-    let pad = if span > 0. { span * 0.14 } else { (max.abs() * 0.02).max(1_073_741_824.) };
-    let lo = (min - pad).max(0.);
-    let mut hi = max + pad;
-    if hi <= lo {
-        hi = lo + 1.;
-    }
-    nice(lo, hi)
+/// The y domain for free space, [`y_domain`] mirrored, and whether the
+/// stack is cut below the disk size. The top sits above the highest bottom
+/// of the scanned area, so it always has some height. The bottom is zero
+/// (a full disk) when the free space below the lowest line is no taller
+/// than the data itself; otherwise it hugs the data.
+fn free_domain(pts: &[SeriesPt]) -> (f64, f64, bool) {
+    let free = |p: &SeriesPt| p.free.unwrap_or(0) as f64;
+    let min_free = pts.iter().map(free).fold(f64::MAX, f64::min);
+    let max_top = pts.iter().map(|p| free(p) + (p.used - p.scanned) as f64).fold(0., f64::max);
+    let disk = pts.iter().map(|p| free(p) + p.used as f64).fold(0., f64::max);
+    let span = (max_top - min_free).max(max_top * 0.25);
+    let lo = if min_free <= span { 0. } else { min_free - (span * 0.14).max(1_073_741_824.) };
+    let hi = (max_top + (max_top - lo) * 0.14).min(disk);
+    // Rounding never lifts the top past the disk, where the stack ends.
+    let (lo, hi) = nice(lo, hi);
+    (lo, hi.min(disk), hi < disk)
 }
 
 /// The y domain and whether the disk-size line fits in it. The bottom sits
@@ -310,15 +326,17 @@ struct Plot {
     iw: f32,
     ih: f32,
     xs: Vec<f32>,
-    /// Top of the stack: used space.
+    /// The line: used space, or free space.
     ys: Vec<f32>,
-    /// Top of the scanned area.
+    /// The edge of the scanned area: its top, or its bottom for free space
+    /// (where the stack hangs from the top).
     ys_scanned: Vec<f32>,
     /// Disk size per scan, when it fits in the domain and is known.
     ys_cap: Vec<Option<f32>>,
-    /// The axis doesn't start at zero.
+    /// The stack is cut: the axis doesn't start at zero, or for free space
+    /// doesn't reach the disk size.
     broken: bool,
-    /// Free space is plotted; `ys_scanned` equals `ys`.
+    /// Free space is plotted, with the stack above the line.
     free: bool,
     ticks: Vec<(f32, u64)>,
     cur: Option<usize>,
@@ -329,20 +347,27 @@ struct Plot {
 impl Plot {
     fn new(series: &Series, w: f32, h: f32) -> Plot {
         let iw = (w - M_LEFT - M_RIGHT).max(1.);
-        let ih = (h - M_TOP - M_BOTTOM).max(1.);
-        let free: Vec<u64> = series.pts.iter().map(|p| p.free.unwrap_or(0)).collect();
-        let (lo, hi, show_cap) = if series.free {
-            let (lo, hi) = free_domain(&free);
-            (lo, hi, false)
+        // For free space the pill's row moves from the top margin to the
+        // bottom one; the plot keeps its height.
+        let (m_top, m_bottom) = if series.free { (M_TOP - PILL_ROW, M_BOTTOM + PILL_ROW) } else { (M_TOP, M_BOTTOM) };
+        let ih = (h - m_top - m_bottom).max(1.);
+        let (lo, hi, show_cap, broken) = if series.free {
+            let (lo, hi, cut) = free_domain(&series.pts);
+            (lo, hi, false, cut)
         } else {
-            y_domain(&series.pts)
+            let (lo, hi, show_cap) = y_domain(&series.pts);
+            (lo, hi, show_cap, lo > 0.)
         };
-        let y = |v: f64| M_TOP + ih - ((v.max(lo) - lo) / (hi - lo)) as f32 * ih;
+        let y = |v: f64| m_top + ih - ((v.max(lo) - lo) / (hi - lo)) as f32 * ih;
         let span = (iw - 2. * X_INSET).max(1.);
         let xs = x_positions(series.pts.len(), span, series.cur, series.cmp).into_iter().map(|x| x + M_LEFT + X_INSET).collect();
         let (ys, ys_scanned) = if series.free {
-            let ys: Vec<f32> = free.iter().map(|&f| y(f as f64)).collect();
-            (ys.clone(), ys)
+            // Free space plus unscanned space: everything but scanned files.
+            let free = |p: &SeriesPt| p.free.unwrap_or(0);
+            (
+                series.pts.iter().map(|p| y(free(p) as f64)).collect(),
+                series.pts.iter().map(|p| y((free(p) + p.used - p.scanned) as f64)).collect(),
+            )
         } else {
             (series.pts.iter().map(|p| y(p.used as f64)).collect(), series.pts.iter().map(|p| y(p.scanned as f64)).collect())
         };
@@ -351,7 +376,7 @@ impl Plot {
         let ticks = ticks(lo, hi, 3.).into_iter().map(|t| (y(t), t.max(0.) as u64)).collect();
         Plot {
             w,
-            top: M_TOP,
+            top: m_top,
             left: M_LEFT,
             iw,
             ih,
@@ -359,7 +384,7 @@ impl Plot {
             ys,
             ys_scanned,
             ys_cap,
-            broken: lo > 0.,
+            broken,
             free: series.free,
             ticks,
             cur: series.cur,
@@ -370,6 +395,23 @@ impl Plot {
 
     fn bottom(&self) -> f32 {
         self.top + self.ih
+    }
+
+    /// Top and height of the compare band: the plot plus a 6 px overhang
+    /// toward the change pill.
+    fn band(&self) -> (f32, f32) {
+        (if self.free { self.top } else { self.top - 6. }, self.ih + 6.)
+    }
+
+    /// Top of the change pill.
+    fn pill_y(&self) -> f32 {
+        if self.free { self.bottom() + PILL_ROW - PILL_H } else { self.top - PILL_ROW }
+    }
+
+    /// Where the month row starts: right under the plot, or under the
+    /// pill's row for free space.
+    fn months_y(&self) -> f32 {
+        if self.free { self.bottom() + PILL_ROW } else { self.bottom() }
     }
 
     fn dot_r(&self, i: usize) -> f32 {
@@ -409,14 +451,23 @@ impl Plot {
             .map(|(i, _)| i)
     }
 
-    /// Triangle points (pointing down at the dot) and its click area. The
-    /// click area stops just above the dot so the dot itself stays clickable.
+    /// Triangle points and its click area, on the empty side of the line so
+    /// it never sits on the stack: above the dot pointing down, or below it
+    /// pointing up for free space. The click area stops just short of the
+    /// dot so the dot itself stays clickable.
     fn triangle(&self, i: usize) -> ([(f32, f32); 3], Rect) {
         let (x, y, r) = (self.xs[i], self.ys[i], self.dot_r(i));
-        let ty = y - r - 8.;
-        let pts = [(x - 6., ty - 8.), (x + 6., ty - 8.), (x, ty + 2.)];
-        let hit_top = ty - 14.;
-        (pts, Rect::new(x - 16., hit_top, 32., (y - r - 2.) - hit_top))
+        if self.free {
+            let ty = y + r + 8.;
+            let pts = [(x - 6., ty + 8.), (x + 6., ty + 8.), (x, ty - 2.)];
+            let hit_top = y + r + 2.;
+            (pts, Rect::new(x - 16., hit_top, 32., (ty + 14.) - hit_top))
+        } else {
+            let ty = y - r - 8.;
+            let pts = [(x - 6., ty - 8.), (x + 6., ty - 8.), (x, ty + 2.)];
+            let hit_top = ty - 14.;
+            (pts, Rect::new(x - 16., hit_top, 32., (y - r - 2.) - hit_top))
+        }
     }
 
     fn scrub_rect(&self) -> Option<Rect> {
@@ -562,7 +613,7 @@ impl GraphView {
                     .child(div().text_color(p.text).font_weight(FontWeight::SEMIBOLD).child(format::long_date(pt.at)))
                     .when(pt.temporary, |el| el.child(div().text_color(p.new).child("Temporary"))),
             )
-            .when_some(pt.free, |el, f| el.child(row("Free", format::bytes(f))))
+            .when_some(pt.free, |el, f| el.child(row("Available", format::bytes(f))))
             .child(row("Used", format::bytes(pt.used)))
             .child(row("Not scanned", format::bytes(pt.used - pt.scanned)))
             .child(row("Scanned files", format::bytes(pt.scanned)))
@@ -705,7 +756,7 @@ impl Render for GraphView {
                     }
                     let hover = if area.is_hovered(window) {
                         let old = view.read(cx).hover.target.and_then(|id| ids.iter().position(|&x| x == id));
-                        // Keep the triangle while the pointer travels up to it.
+                        // Keep the triangle while the pointer travels to it.
                         let sticky = old.filter(|&t| Some(t) != plot.cmp && plot.triangle(t).1.contains(x, y));
                         let target = sticky.or_else(|| plot.target_near(x, y));
                         let hot = target.is_some_and(|t| plot.triangle(t).1.contains(x, y));
@@ -813,20 +864,17 @@ fn paint_graph(
     if let (Some(c), Some(k)) = (plot.cmp, plot.cur) {
         let (l, r) = (plot.xs[c].min(plot.xs[k]), plot.xs[c].max(plot.xs[k]));
         let tint = p.accent.opacity(if p.dark { 0.14 } else { 0.08 });
-        window.paint_quad(fill(to_bounds(o, Rect::new(l, plot.top - 6., r - l, bottom - plot.top + 6.)), tint));
+        let (y, h) = plot.band();
+        window.paint_quad(fill(to_bounds(o, Rect::new(l, y, r - l, h)), tint));
     }
 
-    if n >= 2 && plot.free {
-        // Free space: one area under the line.
-        let mut pts: Vec<(f32, f32)> = plot.xs.iter().copied().zip(plot.ys.iter().copied()).collect();
-        pts.push((plot.xs[n - 1], bottom));
-        pts.push((plot.xs[0], bottom));
-        polygon(window, o, &pts, p.accent.opacity(if p.dark { 0.16 } else { 0.12 }));
-    } else if n >= 2 {
-        // Scanned files.
+    if n >= 2 {
+        // Scanned files, up from the bottom, or down from the top for free
+        // space.
+        let base = if plot.free { plot.top } else { bottom };
         let mut pts: Vec<(f32, f32)> = plot.xs.iter().copied().zip(plot.ys_scanned.iter().copied()).collect();
-        pts.push((plot.xs[n - 1], bottom));
-        pts.push((plot.xs[0], bottom));
+        pts.push((plot.xs[n - 1], base));
+        pts.push((plot.xs[0], base));
         polygon(window, o, &pts, p.scanned);
 
         // Not scanned: a tint and stripes between the two tops.
@@ -874,18 +922,20 @@ fn paint_graph(
         draw_text(&t, o, x1 - t.w, last.1 - 3. - LH, LH, window, cx);
     }
 
-    // The cut at the bottom of the axis.
+    // The cut in the stack: at the bottom, or the top for free space.
     if plot.broken && n >= 2 {
-        let (x, y) = (plot.left + X_INSET + 12., bottom);
-        polygon(window, o, &[(x + 4., y - 14.), (x + 8., y - 14.), (x + 1., y + 1.), (x - 3., y + 1.)], p.elevated);
+        let x = plot.left + X_INSET + 12.;
+        let (y0, y1) = if plot.free { (plot.top - 1., plot.top + 14.) } else { (bottom - 14., bottom + 1.) };
+        polygon(window, o, &[(x + 4., y0), (x + 8., y0), (x + 1., y1), (x - 3., y1)], p.elevated);
     }
 
     // Month labels.
     let keys: Vec<(i32, u32)> = series.pts.iter().map(|x| month_key(x.at)).collect();
     let months = month_labels(&plot.xs, &keys);
+    let my = plot.months_y();
     for (k, &i) in months.iter().enumerate() {
         let x = plot.xs[i];
-        window.paint_quad(fill(to_bounds(o, Rect::new(x.round() - 0.5, bottom + 3., 1., 4.)), p.grid.opacity(2.)));
+        window.paint_quad(fill(to_bounds(o, Rect::new(x.round() - 0.5, my + 3., 1., 4.)), p.grid.opacity(2.)));
         let t = shape(window, &month_label(series.pts[i].at), TICK_FONT, FontWeight::NORMAL, p.dim);
         let lx = if n > 1 && k == 0 && i == 0 {
             x
@@ -894,13 +944,14 @@ fn paint_graph(
         } else {
             x - t.w / 2.
         };
-        draw_text(&t, o, lx, bottom + 18. - 9., LH, window, cx);
+        draw_text(&t, o, lx, my + 18. - 9., LH, window, cx);
     }
 
     // The compare edge of the band, which drags.
     if let Some(c) = plot.cmp {
         let x = plot.xs[c].round() - 0.5;
-        window.paint_quad(fill(to_bounds(o, Rect::new(x, plot.top - 6., 1., bottom - plot.top + 6.)), p.accent.opacity(0.45)));
+        let (y, h) = plot.band();
+        window.paint_quad(fill(to_bounds(o, Rect::new(x, y, 1., h)), p.accent.opacity(0.45)));
     }
 
     // Dots on the used line.
@@ -919,8 +970,9 @@ fn paint_graph(
         }
     }
 
-    // The change in used (or free) space, on top of the band. More free
-    // space is good news, so its colors are flipped.
+    // The change in used (or free) space, at the band's open end: on top,
+    // or under it for free space. More free space is good news, so its
+    // colors are flipped.
     if let (Some(c), Some(k)) = (plot.cmp, plot.cur) {
         let value = |i: usize| if plot.free { series.pts[i].free.unwrap_or(0) } else { series.pts[i].used } as i64;
         let d = value(k) - value(c);
@@ -928,7 +980,7 @@ fn paint_graph(
         let w = t.w + 2. * PILL_PX;
         let mid = (plot.xs[c] + plot.xs[k]) / 2.;
         let x = (mid - w / 2.).clamp(2., (plot.w - w - 2.).max(2.));
-        let y = plot.top - 6. - PILL_H - 4.;
+        let y = plot.pill_y();
         let color = if d == 0 {
             p.dim
         } else {
@@ -963,9 +1015,11 @@ fn outside_stripes(plot: &Plot) -> Vec<((f32, f32), (f32, f32))> {
             continue;
         }
         let slope = |ya: f32, yb: f32| (yb - ya) / (xb - xa);
-        let (ta, st) = (plot.ys[i - 1], slope(plot.ys[i - 1], plot.ys[i]));
-        let (ba, sb) = (plot.ys_scanned[i - 1], slope(plot.ys_scanned[i - 1], plot.ys_scanned[i]));
-        let (tb, bb) = (plot.ys[i], plot.ys_scanned[i]);
+        // For free space the scanned area is above the line.
+        let (top, bot) = if plot.free { (&plot.ys_scanned, &plot.ys) } else { (&plot.ys, &plot.ys_scanned) };
+        let (ta, st) = (top[i - 1], slope(top[i - 1], top[i]));
+        let (ba, sb) = (bot[i - 1], slope(bot[i - 1], bot[i]));
+        let (tb, bb) = (top[i], bot[i]);
         let corners = [xa + ta, xa + ba, xb + tb, xb + bb];
         let k_min = corners.iter().copied().fold(f32::MAX, f32::min).div_euclid(STRIPE_GAP) * STRIPE_GAP;
         let k_max = corners.iter().copied().fold(f32::MIN, f32::max);
@@ -1077,6 +1131,22 @@ mod tests {
     }
 
     #[test]
+    fn points_beyond_a_spread_pair_never_pile_on_the_edge() {
+        // 50 scans over 1900 px, the pair second and third from the end (or
+        // the start): the scan beyond it keeps its own spot.
+        let xs = x_positions(50, 1900., Some(48), Some(47));
+        assert!((xs[48] - xs[47] - MIN_PAIR_GAP).abs() < 0.01);
+        assert!(xs[49] - xs[48] > 20., "{} vs {}", xs[48], xs[49]);
+        assert!((xs[49] - 1900.).abs() < 0.01);
+        let xs = x_positions(50, 1900., Some(1), Some(2));
+        assert!(xs[1] > 20.);
+        assert!((xs[2] - xs[1] - MIN_PAIR_GAP).abs() < 0.01);
+        for xs in [x_positions(50, 1900., Some(48), Some(47)), x_positions(50, 1900., Some(1), Some(2))] {
+            assert!(xs.windows(2).all(|w| w[1] > w[0]));
+        }
+    }
+
+    #[test]
     fn scrub_snaps_by_x_and_never_onto_current() {
         let s = series(5, Some(4), Some(3));
         let plot = Plot::new(&s, 600., HEIGHT);
@@ -1108,6 +1178,17 @@ mod tests {
         let (_, hit) = plot.triangle(1);
         assert!(hit.bottom() < plot.ys[1] - DOT_R);
         assert!(hit.contains(plot.xs[1], plot.ys[1] - DOT_R - 10.));
+        // For free space the stack is above the line, so the triangle goes
+        // below the dot, pointing up at it.
+        let mut s = s;
+        s.free = true;
+        let plot = Plot::new(&s, 600., HEIGHT);
+        let (tri, hit) = plot.triangle(1);
+        assert!(tri.iter().all(|&(_, y)| y > plot.ys[1] + DOT_R));
+        assert!(tri[2].1 < tri[0].1, "points up");
+        assert!(hit.y > plot.ys[1] + DOT_R);
+        assert!(hit.contains(plot.xs[1], plot.ys[1] + DOT_R + 10.));
+        assert_eq!(plot.target_near(plot.xs[1] + 5., plot.ys[1] + 10.), Some(1));
     }
 
     #[test]
@@ -1166,16 +1247,28 @@ mod tests {
         let plot = Plot::new(&s, 600., HEIGHT);
         // Free space shrinks over the series, so the line falls (y grows).
         assert!(plot.ys.windows(2).all(|w| w[1] > w[0]));
-        assert_eq!(plot.ys, plot.ys_scanned);
+        // The scanned area hangs above the line, cut below the disk size.
+        assert!(plot.ys.iter().zip(&plot.ys_scanned).all(|(l, s)| s < l));
+        assert!(plot.ys_scanned.iter().all(|&s| s > plot.top));
+        assert!(plot.broken);
         assert!(plot.ys_cap.iter().all(Option::is_none));
-        assert!(outside_stripes(&plot).is_empty());
+        // The pill moves under the band, between the plot and the months,
+        // and the plot keeps its height.
+        let used = Plot::new(&series(10, Some(9), Some(4)), 600., HEIGHT);
+        assert_eq!(plot.ih, used.ih);
+        assert!(used.pill_y() + PILL_H < used.band().0);
+        let (by, bh) = plot.band();
+        assert!(plot.pill_y() > by + bh && plot.pill_y() + PILL_H <= plot.months_y());
+        assert!(plot.months_y() + 18. <= HEIGHT);
     }
 
     #[test]
     fn stripes_stay_between_used_and_scanned() {
-        for w in [420., 900.] {
-            let s = series(10, Some(9), Some(4));
+        for (w, free) in [(420., false), (900., false), (420., true), (900., true)] {
+            let mut s = series(10, Some(9), Some(4));
+            s.free = free;
             let plot = Plot::new(&s, w, HEIGHT);
+            let (top, bot) = if free { (&plot.ys_scanned, &plot.ys) } else { (&plot.ys, &plot.ys_scanned) };
             let stripes = outside_stripes(&plot);
             assert!(!stripes.is_empty());
             let at = |ys: &[f32], x: f32| {
@@ -1185,7 +1278,7 @@ mod tests {
             };
             for &(a, z) in &stripes {
                 for (x, y) in [a, z] {
-                    assert!(y >= at(&plot.ys, x) - 0.05 && y <= at(&plot.ys_scanned, x) + 0.05, "({x}, {y}) leaves the area");
+                    assert!(y >= at(top, x) - 0.05 && y <= at(bot, x) + 0.05, "({x}, {y}) leaves the area");
                 }
                 // Every stripe runs at 45°.
                 assert!(((z.0 - a.0) + (z.1 - a.1)).abs() < 0.01);

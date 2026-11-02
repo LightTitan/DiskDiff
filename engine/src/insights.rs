@@ -134,7 +134,7 @@ impl Options {
     }
 }
 
-struct JunkRule {
+pub(crate) struct JunkRule {
     name: &'static str,
     category: &'static str,
     hint: &'static str,
@@ -169,13 +169,13 @@ const PROTECTED: &[&str] = &[
     "Volumes", "Windows", "Program Files", "Program Files (x86)", "ProgramData",
 ];
 
-fn junk_rule(name: &str) -> Option<&'static JunkRule> {
+pub(crate) fn junk_rule(name: &str) -> Option<&'static JunkRule> {
     JUNK.iter().find(|r| r.name.eq_ignore_ascii_case(name))
 }
 
 /// Packages are one opaque unit: nothing inside a signed bundle or a media
 /// library may be cleaned up piecemeal.
-fn is_package(d: &DirChild) -> bool {
+pub(crate) fn is_package(d: &DirChild) -> bool {
     d.flags & FLAG_PACKAGE != 0 || crate::platform::is_package(&d.name) || d.name.to_ascii_lowercase().ends_with(".xpc")
 }
 
@@ -536,8 +536,22 @@ pub fn changes(store: &Store, cur: &ScanInfo, cmp: &ScanInfo, min_size: u64, lim
     v.truncate(limit);
     out.changes = v;
     out.moved = moves.total();
-    out.added = w.added.saturating_sub(out.moved);
-    out.removed = w.removed.saturating_sub(out.moved);
+    // The walk counted each move's new end as added and its old end as
+    // removed; only what a folder gained and lost on the way is real.
+    let (mut added, mut removed) = (w.added, w.removed);
+    for m in &moves.list {
+        added = added.saturating_sub(m.after);
+        removed = removed.saturating_sub(m.size);
+        if m.change() != 0
+            && let (Some(a), Some(b)) = (open(store, cur, &m.to)?, open(store, cmp, &m.from)?)
+        {
+            let mut inner = ChangeWalk { store, min: u64::MAX, visits: 0, added: 0, removed: 0 };
+            inner.walk(&m.to, a, b)?;
+            added += inner.added;
+            removed += inner.removed;
+        }
+    }
+    (out.added, out.removed) = (added, removed);
     Ok(out)
 }
 
@@ -566,7 +580,7 @@ fn fold_moves(v: Vec<Change>, moves: &crate::moves::Moves, min: u64) -> Vec<Chan
         out.push(Change {
             path: m.to.clone(),
             is_dir: m.is_dir,
-            size: m.size,
+            size: m.after,
             prev: 0,
             status: Status::Added,
             moved_bytes: m.size as i64,

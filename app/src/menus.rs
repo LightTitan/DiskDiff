@@ -249,7 +249,7 @@ fn set_menus(s: &AppState, cx: &App) {
                 MenuItem::separator(),
                 checked("Descending", ReverseSortOrder, s.descending),
             ])),
-            checked("Graph Free Space", ToggleGraphFree, s.settings.graph_free),
+            checked("Graph Available Space", ToggleGraphFree, s.settings.graph_free),
             checked("Deep Folder Activity", ToggleDeepActivity, s.settings.deep_activity),
             MenuItem::separator(),
             MenuItem::action("Enter Full Screen", ToggleFullScreen),
