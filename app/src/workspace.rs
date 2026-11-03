@@ -489,6 +489,8 @@ impl Render for Workspace {
         let show_manage = s.show_manage;
         let banner = s.banner.clone();
         let has_scan = s.current_scan().is_some();
+        // A first scan shows live in the browser before anything is saved.
+        let show_files = has_scan || s.live_job().is_some();
         let show_graph = {
             let h = s.history();
             !h.is_empty() && !h.iter().all(|x| x.temporary)
@@ -512,7 +514,7 @@ impl Render for Workspace {
                 .when_some(banner, |el, b| {
                     el.child(div().px(px(14.)).py(px(6.)).text_size(px(12.)).bg(p.up.opacity(0.14)).text_color(p.up).child(b))
                 })
-                .child(if has_scan {
+                .child(if show_files {
                     div()
                         .id("files-row")
                         .flex_1()

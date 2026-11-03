@@ -222,6 +222,14 @@ impl AppState {
         self.current_scan().map(|s| PathBuf::from(&s.root))
     }
 
+    /// The running scan, when the browser shows it live: a scan of the shown
+    /// location, or any scan while there is nothing else to show.
+    pub fn live_job(&self) -> Option<&ScanJob> {
+        let job = self.job.as_ref()?;
+        let root = self.root();
+        (root.is_none() || root.as_ref() == Some(&job.root) || self.location.as_ref() == Some(&job.root)).then_some(job)
+    }
+
     /// Whether the browser shows deltas.
     pub fn comparing(&self) -> bool {
         self.compare_scan().is_some() && self.current_scan().is_some_and(|s| !s.temporary)

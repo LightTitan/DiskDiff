@@ -16,6 +16,10 @@
 //! * Keyboard: ↑/↓ move, → enters a folder, ← goes back, ⌘↑ parent, typing
 //!   selects by name (Finder type-to-select), ⌘R reveals, ⌥⌘C copies the path.
 //! * Arrow cursor everywhere; resize grips use the resize cursor.
+//! * While a scan of the shown folder runs, the columns show it live: folders
+//!   appear as they are listed, sizes count up, rows glide to their new place
+//!   as the order changes. Folders deeper than the scan reports live show
+//!   their contents once it finishes.
 
 use crate::format;
 use crate::state::{AppState, SortKey, file_manager};
@@ -23,11 +27,12 @@ use crate::theme::{ActivePalette, Palette};
 use crate::widgets::{icon, icon_button, icon_button_disabled, spinner, truncate_start};
 use diskdiff_engine::cloud::{self, CloudSize};
 use diskdiff_engine::moves::{self, Moves};
-use diskdiff_engine::{Item, ScanInfo, Status, platform, query};
+use diskdiff_engine::scan::LIVE_DEPTH;
+use diskdiff_engine::{Item, Progress, ScanInfo, Status, platform, query};
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -47,6 +52,8 @@ const NAME_MIN: f32 = 72.;
 /// Width of a figure shrunk to a "…" pill.
 const PILL_W: f32 = 20.;
 const PREVIEW_W: f32 = 280.;
+/// How often a live scan's numbers are read; rows animate between reads.
+const LIVE_TICK: Duration = Duration::from_millis(66);
 const MB: u64 = 1_000_000;
 const GB: u64 = 1_000_000_000;
 
@@ -98,6 +105,10 @@ struct Column {
     cloud: HashMap<String, CloudSize>,
     cloud_key: Option<Key>,
     cloud_cancel: Arc<AtomicBool>,
+    /// Folders a live scan is still walking, by name.
+    counting: HashSet<Arc<str>>,
+    /// Where each row is drawn while it animates, by name.
+    motion: HashMap<Arc<str>, Motion>,
 }
 
 impl Column {
@@ -115,8 +126,57 @@ impl Column {
             cloud: HashMap::new(),
             cloud_key: None,
             cloud_cancel: Arc::new(AtomicBool::new(false)),
+            counting: HashSet::new(),
+            motion: HashMap::new(),
         }
     }
+
+    /// Moves every animating row one frame closer to its place, size and full
+    /// opacity. New rows start animating only during a live scan. Returns
+    /// whether anything still moves.
+    fn step(&mut self, dt: f32, live: bool) -> bool {
+        // Exponential easing: the same feel at any frame rate.
+        let ease = |tau: f32| 1. - (-dt / tau).exp();
+        let (k_y, k_size, k_alpha) = (ease(0.08), ease(0.12) as f64, ease(0.12));
+        let mut moving = false;
+        for (ix, it) in self.items.iter().enumerate() {
+            let y = ix as f32 * ROW_H;
+            let size = it.size as f64;
+            let Some(m) = self.motion.get_mut(&it.name) else {
+                if live {
+                    // Appears in place, fades in and counts up from zero.
+                    self.motion.insert(it.name.clone(), Motion { y, size: 0., alpha: 0. });
+                    moving = true;
+                }
+                continue;
+            };
+            m.y += (y - m.y) * k_y;
+            m.size += (size - m.size) * k_size;
+            m.alpha += (1. - m.alpha) * k_alpha;
+            if (y - m.y).abs() < 0.3 {
+                m.y = y;
+            }
+            if (size - m.size).abs() <= (size * 0.0005).max(1.) {
+                m.size = size;
+            }
+            if m.alpha > 0.995 {
+                m.alpha = 1.;
+            }
+            moving |= m.y != y || m.size != size || m.alpha < 1.;
+        }
+        if !live && !moving {
+            self.motion.clear();
+        }
+        moving
+    }
+}
+
+/// A row as drawn mid-animation.
+#[derive(Clone, Copy)]
+struct Motion {
+    y: f32,
+    size: f64,
+    alpha: f32,
 }
 
 impl Drop for Column {
@@ -169,6 +229,10 @@ pub struct Browser {
     moves: Option<((u64, i64, i64), Arc<Moves>)>,
     moves_wanted: Option<(u64, i64, i64)>,
     moves_cancel: Arc<AtomicBool>,
+    /// The running scan the columns show live.
+    live: Option<Arc<Progress>>,
+    live_at: Instant,
+    frame_at: Instant,
 }
 
 impl Browser {
@@ -204,6 +268,9 @@ impl Browser {
             moves: None,
             moves_wanted: None,
             moves_cancel: Arc::new(AtomicBool::new(false)),
+            live: None,
+            live_at: Instant::now(),
+            frame_at: Instant::now(),
         };
         b.sync(cx);
         window.focus(&b.focus, cx);
@@ -252,10 +319,22 @@ impl Browser {
     /// Brings columns in line with the state: resets on a new root, handles
     /// reveal requests, reloads listings whose inputs changed.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let (root, reveal) = {
+        let (root, reveal, live) = {
             let s = self.state.read(cx);
-            (s.root(), s.reveal.clone())
+            let job = s.live_job();
+            (job.map(|j| j.root.clone()).or_else(|| s.root()), s.reveal.clone(), job.map(|j| j.progress.clone()))
         };
+        if live.is_some() != self.live.is_some() {
+            // A live scan starts from nothing; when it ends, the rows glide
+            // into the saved scan's order.
+            for col in &mut self.columns {
+                col.key = None;
+                if live.is_some() {
+                    col.motion.clear();
+                }
+            }
+        }
+        self.live = live;
         if root != self.root {
             self.root = root;
             self.chain.clear();
@@ -290,14 +369,79 @@ impl Browser {
             if i == self.columns.len() {
                 self.columns.push(Column::new(p));
             }
-            if self.columns[i].key.as_ref() != Some(&key) {
+            if self.live.is_some() {
+                self.reload_live(i, &key, cx);
+            } else if self.columns[i].key.as_ref() != Some(&key) {
                 self.reload(i, &key, cx);
             }
+        }
+        if self.live.is_some() {
+            return;
         }
         self.start_moves(&key, cx);
         self.start_activity(&key, cx);
         self.start_cloud(&key, cx);
         self.update_free_space();
+    }
+
+    /// Fills column `i` from the running scan.
+    fn reload_live(&mut self, i: usize, key: &Key, cx: &mut Context<Self>) {
+        let Some(progress) = self.live.clone() else { return };
+        let Some(rel) = self.root.as_ref().and_then(|r| self.columns[i].path.strip_prefix(r).ok()).map(Path::to_owned) else { return };
+        let col = &mut self.columns[i];
+        // Reload from the store once the scan is over.
+        col.key = None;
+        col.items.clear();
+        col.counting.clear();
+        col.error = None;
+        let dir = progress.live.find(&rel);
+        let Some(contents) = dir.and_then(|d| d.contents.get()) else {
+            col.error = Some(if rel.components().count() >= LIVE_DEPTH {
+                "Its contents show when the scan finishes.".into()
+            } else if dir.is_some_and(|d| d.unreadable.load(Relaxed)) {
+                "This folder couldn’t be read.".into()
+            } else {
+                "Scanning…".into()
+            });
+            return;
+        };
+        for d in &contents.dirs {
+            if !d.done.load(Relaxed) {
+                col.counting.insert(d.name.clone());
+            }
+            col.items.push(Item {
+                name: d.name.clone(),
+                is_dir: true,
+                package: d.package,
+                unreadable: d.unreadable.load(Relaxed),
+                cloud: d.cloud,
+                size: d.bytes.load(Relaxed),
+                prev: None,
+                files: 0,
+                dirs: 0,
+                status: Status::NoHistory,
+                placeholder: false,
+                moved_bytes: 0,
+                moved: None,
+            });
+        }
+        col.items.extend(contents.files.iter().map(|(name, size)| Item {
+            name: name.clone(),
+            is_dir: false,
+            package: false,
+            unreadable: false,
+            cloud: false,
+            size: *size,
+            prev: None,
+            files: 1,
+            dirs: 0,
+            status: Status::NoHistory,
+            placeholder: false,
+            moved_bytes: 0,
+            moved: None,
+        }));
+        sort_items(&mut col.items, key.sort, key.descending, false);
+        cx.notify();
     }
 
     fn reload(&mut self, i: usize, key: &Key, cx: &mut Context<Self>) {
@@ -551,7 +695,11 @@ impl Browser {
             if self.columns.len() <= i {
                 let p = self.column_path(i).unwrap();
                 self.columns.push(Column::new(p));
-                self.reload(i, &key, cx);
+                if self.live.is_some() {
+                    self.reload_live(i, &key, cx);
+                } else {
+                    self.reload(i, &key, cx);
+                }
             }
             let Some(item) = self.columns[i].items.iter().find(|it| &*it.name == part.as_str()) else { break };
             self.chain.push(ChainItem { name: item.name.clone(), is_dir: item.is_dir });
@@ -644,8 +792,7 @@ impl Browser {
     fn fit_width(&self, col: usize, cx: &App) -> f32 {
         let Some(c) = self.columns.get(col) else { return DEFAULT_W };
         let longest = c.items.iter().map(|it| it.name.chars().count()).max().unwrap_or(0) as f32;
-        let comparing = self.state.read(cx).comparing();
-        let extra = if comparing { 150. } else { 0. };
+        let extra = if self.comparing(cx) { 150. } else { 0. };
         (longest * 7.0 + 140. + extra).clamp(MIN_W, MAX_W)
     }
 
@@ -828,9 +975,16 @@ impl Browser {
 
     // ---- rendering -----------------------------------------------------------------
 
+    /// Whether rows show changes. A live scan's rows show only their size:
+    /// figures left over from the scans it replaces would be misleading.
+    fn comparing(&self, cx: &App) -> bool {
+        self.live.is_none() && self.state.read(cx).comparing()
+    }
+
     fn render_rows(&self, col: usize, range: Range<usize>, focused: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = cx.palette();
-        let comparing = self.state.read(cx).comparing();
+        let comparing = self.comparing(cx);
+        let live = self.live.is_some();
         let Some(c) = self.columns.get(col) else { return Vec::new() };
         let selected_ix = self.selected_index(col);
         let is_last = col + 1 == self.chain.len();
@@ -840,10 +994,13 @@ impl Browser {
                 let it = c.items.get(ix)?;
                 let selected = selected_ix == Some(ix) && is_last;
                 let open = selected_ix == Some(ix) && !is_last;
-                let activity = c.activity.get(&it.name).copied();
-                let pending = c.activity_pending && it.is_dir && it.status == Status::Changed && activity.is_none();
+                let activity = c.activity.get(&it.name).copied().filter(|_| !live);
+                let pending = !live && c.activity_pending && it.is_dir && it.status == Status::Changed && activity.is_none();
+                let cloud = c.cloud.get(&*it.name).copied().filter(|_| !live);
+                let motion = c.motion.get(&it.name).map(|m| (m.y - ix as f32 * ROW_H, m.alpha, m.size as u64));
+                let counting = live.then(|| c.counting.contains(&it.name));
                 Some(
-                    row(it, ix, col, width, selected, open, focused, comparing, activity, pending, c.cloud.get(&*it.name).copied(), &this, &self.state, &p)
+                    row(it, ix, col, width, selected, open, focused, comparing, activity, pending, cloud, motion, counting, &this, &self.state, &p)
                         .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                             window.focus(&this.focus, cx);
                             this.select(col, ix, cx);
@@ -1058,7 +1215,7 @@ impl Browser {
         let col = self.chain.len() - 1;
         let item = self.columns.get(col)?.items.get(self.selected_index(col)?)?.clone();
         let path = self.selected_path()?;
-        let comparing = self.state.read(cx).comparing();
+        let comparing = self.comparing(cx);
         if item.placeholder {
             return Some(
                 div()
@@ -1286,6 +1443,10 @@ fn row(
     activity: Option<u64>,
     pending: bool,
     cloud_size: Option<CloudSize>,
+    // Mid-animation: offset from its slot, opacity, and the size shown.
+    motion: Option<(f32, f32, u64)>,
+    // In a live scan: whether the folder is still being counted.
+    counting: Option<bool>,
     browser: &Entity<Browser>,
     state: &Entity<AppState>,
     p: &Palette,
@@ -1316,7 +1477,7 @@ fn row(
     };
     let icon_color = if on_sel { p.on_selected } else if removed { p.faint } else { icon_color };
     let delta = it.change();
-    let cloud = cloud_badge(it, cloud_size, ix, on_sel, p);
+    let cloud = if counting.is_some() { None } else { cloud_badge(it, cloud_size, ix, on_sel, p) };
     let fit = row_fit(it, width, comparing, activity, pending, cloud.is_some());
     let (churn, loud) = (fit.churn, fit.loud);
     let widen = {
@@ -1378,6 +1539,7 @@ fn row(
         .rounded(px(5.))
         .text_size(px(12.))
         .cursor_default()
+        .when_some(motion, |el, (offset, alpha, _)| el.relative().top(px(offset)).opacity(alpha))
         .when(selected, |el| el.bg(if focused { p.row_selected } else { p.row_selected_inactive }))
         .when(open, |el| el.bg(p.row_open))
         .when(!selected && !open, |el| el.hover(|s| s.bg(p.row_hover)))
@@ -1428,8 +1590,10 @@ fn row(
                 .w(px(58.))
                 .flex()
                 .justify_end()
-                .text_color(sub)
-                .child(if removed { String::new() } else { format::bytes(it.size) }),
+                // Equal-width digits, so counting sizes don't jitter.
+                .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
+                .text_color(if counting == Some(true) && !on_sel { p.faint } else { sub })
+                .child(if removed { String::new() } else { format::bytes(motion.map_or(it.size, |m| m.2)) }),
         )
         .child(
             div()
@@ -1683,6 +1847,23 @@ impl Render for Browser {
             } else {
                 cx.on_next_frame(window, |_, _, cx| cx.notify());
             }
+        }
+        // Animation: read a live scan a few times a second and ease every row
+        // towards it on each frame in between.
+        let now = Instant::now();
+        let dt = (now - self.frame_at).as_secs_f32().min(0.1);
+        self.frame_at = now;
+        if self.live.is_some() && now - self.live_at >= LIVE_TICK {
+            self.live_at = now;
+            self.load_columns(cx);
+        }
+        let live = self.live.is_some();
+        let mut moving = false;
+        for col in &mut self.columns {
+            moving |= col.step(dt, live);
+        }
+        if live || moving {
+            window.request_animation_frame();
         }
         // Drop the trailing spacer once the user scrolls back into the content.
         if self.spacer > 0. && self.scroll_x() + self.viewport_width() <= self.total_width() + 1. {

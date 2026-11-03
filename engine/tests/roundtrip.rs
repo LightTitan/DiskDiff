@@ -1,6 +1,7 @@
 use diskdiff_engine::{Progress, Status, Store, query, scan};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::Ordering::Relaxed;
 
 fn write(p: &Path, n: usize) {
     fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -87,4 +88,35 @@ fn big_folder_rescan_writes_little() {
     assert_eq!(&*changed[0].name, "f03000.log");
     store.delete_scans(&[a.scan_id, b.scan_id]).unwrap();
     assert_eq!(store.stats().unwrap().nodes, 0);
+}
+
+#[test]
+fn live_tree_ends_at_the_saved_sizes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write(&root.join("Photos/2024/a/b/deep.jpg"), 30_000);
+    write(&root.join("Photos/2024/top.jpg"), 4000);
+    write(&root.join("Downloads/film.mp4"), 90_000);
+    write(&root.join("notes.txt"), 500);
+    let store = Store::open(&tmp.path().join("db.sqlite")).unwrap();
+    let progress = Progress::default();
+    scan::scan(&store, &root, false, &progress).unwrap();
+
+    let scan = &store.scans().unwrap()[0];
+    let live = &progress.live;
+    assert!(live.done.load(Relaxed));
+    assert_eq!(live.bytes.load(Relaxed), scan.size);
+    let files = &live.contents.get().unwrap().files;
+    assert_eq!(files.iter().map(|(n, _)| &**n).collect::<Vec<_>>(), ["notes.txt"]);
+
+    let root = root.canonicalize().unwrap();
+    for item in query::list(&store, scan, None, &root).unwrap().items.iter().filter(|i| i.is_dir) {
+        let d = live.find(Path::new(&*item.name)).unwrap();
+        assert!(d.done.load(Relaxed));
+        assert_eq!(d.bytes.load(Relaxed), item.size, "{}", item.name);
+    }
+    // Sizes reach the deepest live level; below it there are no listings.
+    let level3 = live.find(Path::new("Photos/2024/a")).unwrap();
+    assert!(level3.bytes.load(Relaxed) > 0 && level3.contents.get().is_none());
+    assert!(live.find(Path::new("Photos/2024/a/b")).is_none());
 }

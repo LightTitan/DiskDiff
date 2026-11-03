@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use std::collections::{BinaryHeap, HashSet};
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,6 +36,45 @@ pub struct Progress {
     cancel: AtomicBool,
     /// Set once the walk is over and the store is committing.
     pub saving: AtomicBool,
+    /// The top of the tree as walked so far, for showing the scan live.
+    pub live: LiveDir,
+}
+
+/// How deep the live tree goes: folders down to this many levels below the
+/// root keep a running size, and the folders above them their listing.
+/// Deeper folders only add to their ancestors' sizes, which keeps the
+/// tree small however big the disk is.
+pub const LIVE_DEPTH: usize = 3;
+
+/// A folder as the walk has seen it so far.
+#[derive(Default)]
+pub struct LiveDir {
+    pub name: Arc<str>,
+    /// Bytes found inside so far; the folder's size once `done`.
+    pub bytes: AtomicU64,
+    pub done: AtomicBool,
+    pub unreadable: AtomicBool,
+    pub cloud: bool,
+    pub package: bool,
+    /// Its entries, once listed. Only folders above [`LIVE_DEPTH`] get them.
+    pub contents: OnceLock<LiveContents>,
+}
+
+pub struct LiveContents {
+    pub dirs: Vec<LiveDir>,
+    pub files: Vec<(Arc<str>, u64)>,
+}
+
+impl LiveDir {
+    /// The folder at `rel` below this one, once the walk has listed it.
+    pub fn find(&self, rel: &Path) -> Option<&LiveDir> {
+        let mut node = self;
+        for part in rel.components() {
+            let name = part.as_os_str().to_str()?;
+            node = node.contents.get()?.dirs.iter().find(|d| &*d.name == name)?;
+        }
+        Some(node)
+    }
 }
 
 impl Progress {
@@ -108,7 +147,8 @@ pub fn scan(store: &Store, root: &Path, temporary: bool, progress: &Progress) ->
         .stack_size(8 << 20)
         .thread_name(|i| format!("scan-{i}"))
         .build()?;
-    let summary = pool.install(|| scan_dir(&ctx, &root, String::new()));
+    let summary = pool.install(|| scan_dir(&ctx, &root, String::new(), &[&progress.live], 0));
+    mark_done(&progress.live, &summary);
     let Ctx { tx, largest, .. } = ctx;
     drop(tx);
     let writer = write_thread.join().map_err(|_| anyhow::anyhow!("writer thread panicked"))??;
@@ -135,7 +175,9 @@ pub fn scan(store: &Store, root: &Path, temporary: bool, progress: &Progress) ->
     Ok(ScanOutcome { scan_id, nodes_added, bytes_added, seconds: t0.elapsed().as_secs_f64() })
 }
 
-fn scan_dir(ctx: &Ctx, path: &Path, rel: String) -> Summary {
+/// `live` holds the live folders this one counts towards: its tracked
+/// ancestors, and itself while `depth` is within [`LIVE_DEPTH`].
+fn scan_dir<'a>(ctx: &Ctx<'a>, path: &Path, rel: String, live: &[&'a LiveDir], depth: usize) -> Summary {
     let mut node = Node::default();
     if ctx.progress.cancelled() {
         return finish(ctx, node);
@@ -175,9 +217,13 @@ fn scan_dir(ctx: &Ctx, path: &Path, rel: String) -> Summary {
     }
     ctx.progress.files.fetch_add(node.files.len() as u64, Relaxed);
     ctx.progress.bytes.fetch_add(bytes, Relaxed);
+    for d in live {
+        d.bytes.fetch_add(bytes, Relaxed);
+    }
 
-    node.dirs = subdirs
-        .into_par_iter()
+    // Filtered up front so a live listing only holds folders that get walked.
+    let subdirs: Vec<(RawEntry, PathBuf)> = subdirs
+        .into_iter()
         .filter_map(|e| {
             if e.dev != 0 && e.dev != ctx.root_dev && !ctx.allowed_devs.contains(&e.dev) {
                 return None; // another volume mounted here
@@ -189,22 +235,65 @@ fn scan_dir(ctx: &Ctx, path: &Path, rel: String) -> Summary {
             if e.ino != 0 && !ctx.seen_dirs[(e.ino % 64) as usize].lock().insert((e.dev, e.ino)) {
                 return None;
             }
+            Some((e, child))
+        })
+        .collect();
+    let contents = (depth < LIVE_DEPTH).then(|| {
+        let listing = LiveContents {
+            dirs: subdirs
+                .iter()
+                .map(|(e, _)| LiveDir {
+                    name: e.name.as_str().into(),
+                    cloud: e.cloud,
+                    package: platform::is_package(&e.name),
+                    ..Default::default()
+                })
+                .collect(),
+            files: node.files.iter().map(|f| (Arc::from(&*f.name), f.size)).collect(),
+        };
+        let this = live.last().expect("a folder within LIVE_DEPTH is live");
+        let _ = this.contents.set(listing);
+        this.contents.get().expect("just set")
+    });
+
+    node.dirs = subdirs
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, (e, child))| {
+            let child_live = contents.map(|c| &c.dirs[i]);
+            let deeper;
+            let live = match child_live {
+                Some(d) => {
+                    deeper = [live, &[d]].concat();
+                    &deeper[..]
+                }
+                None => live,
+            };
             let child_rel = if rel.is_empty() { e.name.clone() } else { format!("{rel}/{}", e.name) };
             // Never open a cloud placeholder: that would download its listing.
             // Its contents are not on this disk, so it takes ~0 bytes here.
             let s = if e.cloud {
                 finish(ctx, Node { flags: FLAG_CLOUD, ..Default::default() })
             } else {
-                scan_dir(ctx, &child, child_rel)
+                scan_dir(ctx, &child, child_rel, live, depth + 1)
             };
+            if let Some(d) = child_live {
+                mark_done(d, &s);
+            }
             let mut flags = s.flags;
             if platform::is_package(&e.name) {
                 flags |= FLAG_PACKAGE;
             }
-            Some(DirChild { name: e.name.into(), hash: s.hash, size: s.size, files: s.files, dirs: s.dirs, flags })
+            DirChild { name: e.name.into(), hash: s.hash, size: s.size, files: s.files, dirs: s.dirs, flags }
         })
         .collect();
     finish(ctx, node)
+}
+
+fn mark_done(d: &LiveDir, s: &Summary) {
+    d.bytes.store(s.size, Relaxed);
+    d.unreadable.store(s.flags & FLAG_UNREADABLE != 0, Relaxed);
+    d.done.store(true, Relaxed);
 }
 
 fn finish(ctx: &Ctx, mut node: Node) -> Summary {
