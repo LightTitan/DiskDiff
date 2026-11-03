@@ -1502,12 +1502,15 @@ fn row(
             .into_any_element(),
         _ => {
             let color = if on_sel { p.on_selected } else { p.delta(delta, it.status == Status::Added) };
-            let real = if fit.full_delta {
-                div().text_color(color).child(format::delta(delta)).into_any_element()
-            } else {
-                let tip = format!("Net change: {}", format::delta(delta));
-                collapsed(("delta-pill", ix), tip, color, if on_sel { p.on_selected.opacity(0.2) } else { p.border }, widen.clone())
-            };
+            // No change shows nothing, not a dash.
+            let real = (delta != 0).then(|| {
+                if fit.full_delta {
+                    div().text_color(color).child(format::delta(delta)).into_any_element()
+                } else {
+                    let tip = format!("Net change: {}", format::delta(delta));
+                    collapsed(("delta-pill", ix), tip, color, if on_sel { p.on_selected.opacity(0.2) } else { p.border }, widen.clone())
+                }
+            });
             div()
                 .flex()
                 .gap(px(6.))
@@ -1523,7 +1526,7 @@ fn row(
                         collapsed(("moved-pill", ix), tip, sub, if on_sel { p.on_selected.opacity(0.2) } else { p.border }, widen.clone())
                     })
                 })
-                .child(real)
+                .children(real)
                 .into_any_element()
         }
     });
@@ -1642,7 +1645,7 @@ fn row_fit(it: &Item, width: f32, comparing: bool, activity: Option<u64>, pendin
     }
     let (mut moved_w, mut real_w) = (0., 0.);
     if comparing {
-        if !matches!(it.status, Status::NoHistory | Status::Unreadable) {
+        if delta != 0 && !matches!(it.status, Status::NoHistory | Status::Unreadable) {
             real_w = est(&format::delta(delta)) + 6.;
         }
         match it.moved.as_ref() {
