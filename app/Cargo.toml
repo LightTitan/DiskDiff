@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 diskdiff-engine = { path = "../engine" }
 diskdiff-ipc = { path = "../ipc" }
+diskdiff-cli = { path = "../cli" }
 gpui-kit = "0.8.0"
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["test-support"] }
 image = { version = "0.25.1", default-features = false, features = ["png"] }
@@ -38,14 +39,14 @@ license-file = ["../LICENSE", "0"]
 extended-description = """\
 DiskDiff scans your disk over time and shows what changed between scans: \
 which folders grew, what was added, moved or deleted, and where your free \
-space went. Includes diskdiff-mcp, a server that lets AI agents read your \
-scan history."""
+space went. Includes diskdiff-cli, a command-line tool and MCP server that lets AI \
+agents read your scan history."""
 section = "utils"
 priority = "optional"
 depends = "$auto"
 assets = [
     ["target/release/diskdiff", "usr/bin/", "755"],
-    ["target/release/diskdiff-mcp", "usr/bin/", "755"],
+    ["target/release/diskdiff-cli", "usr/bin/", "755"],
     ["../packaging/linux/diskdiff.desktop", "usr/share/applications/", "644"],
     ["../packaging/linux/diskdiff.png", "usr/share/icons/hicolor/512x512/apps/diskdiff.png", "644"],
 ]

@@ -13,7 +13,7 @@ macOS; Windows and Linux builds are new and less tested.
 |---|---|
 | `engine` (`diskdiff-engine`) | Scanner, snapshot store, diffs, insights |
 | `app` (`diskdiff`) | The window: graph, comparison summary, column browser, insights, manage scans |
-| `mcp` (`diskdiff-mcp`) | MCP server and CLI that let AI agents read scans and request new ones |
+| `cli` (`diskdiff-cli`) | Command-line tool and MCP server that let AI agents read scans and request new ones |
 | `ipc` (`diskdiff-ipc`) | How other processes ask the running app to scan |
 
 ## Installing
@@ -61,42 +61,76 @@ subvolumes or datasets, but never other disks, network shares, snapshots or tmpf
 
 ## Use with AI agents
 
-DiskDiff ships `diskdiff-mcp`, a [Model Context Protocol](https://modelcontextprotocol.io)
-server that lets AI agents such as Claude Desktop, Claude Code and Cursor read your scan
-history and start new scans. It reads the same store as the app and never deletes or moves
-files: an agent can tell you what to remove and why, and you decide.
+There are three ways to bring DiskDiff into an AI conversation. None of them deletes or moves
+files: an AI can tell you what to remove and why, and you decide.
 
-**Help → Copy AI agent setup** copies the config for your MCP client with the right path.
-On macOS the server is `DiskDiff.app/Contents/MacOS/diskdiff-mcp`, on Windows
-`%LOCALAPPDATA%\Programs\DiskDiff\diskdiff-mcp.exe`, with the .deb `/usr/bin/diskdiff-mcp`. The
-AppImage runs it as `DiskDiff_<version>_amd64.AppImage mcp`. For Claude Code:
+### Copy for AI
+
+**Copy for AI** on the Insights screen (or Edit → Copy Insights for AI) copies what changed,
+the cleanup suggestions and the largest items as Markdown, ending with a question to the AI.
+Paste it into ChatGPT, Claude or any other chat. It's a summary only, and it includes folder
+and file names from the scan. `diskdiff-cli report [<path>]` prints the same report.
+
+### Claude Code (skill)
+
+**Help → Install Claude Code skill** saves a skill to `~/.claude/skills/diskdiff/SKILL.md`.
+When you ask Claude Code about disk space, it runs `diskdiff-cli` itself and can dig through
+the whole scan history: browse folders, compare any two scans, follow a folder's growth and
+start new scans. No MCP config needed. To install it by hand:
 
 ```sh
-claude mcp add diskdiff -- /Applications/DiskDiff.app/Contents/MacOS/diskdiff-mcp
+mkdir -p ~/.claude/skills/diskdiff
+/Applications/DiskDiff.app/Contents/MacOS/diskdiff-cli skill > ~/.claude/skills/diskdiff/SKILL.md
+```
+
+Other agents with a terminal (Codex, Cursor…) can use the CLI the same way; `diskdiff-cli guide`
+prints a how-to for `AGENTS.md` or similar.
+
+### MCP (Claude Desktop, Cursor…)
+
+`diskdiff-cli mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that
+lets MCP clients read your scan history and start new scans. **Help → Copy MCP setup** copies
+the config with the right path. For Claude Code:
+
+```sh
+claude mcp add diskdiff -- /Applications/DiskDiff.app/Contents/MacOS/diskdiff-cli mcp
 ```
 
 For Claude Desktop (`claude_desktop_config.json`) or Cursor (`~/.cursor/mcp.json`):
 
 ```json
-{ "mcpServers": { "diskdiff": { "command": "/Applications/DiskDiff.app/Contents/MacOS/diskdiff-mcp" } } }
+{ "mcpServers": { "diskdiff": { "command": "/Applications/DiskDiff.app/Contents/MacOS/diskdiff-cli", "args": ["mcp"] } } }
 ```
 
 Then ask things like "What grew on my disk since last week?" or "What could I safely clean up
 in my home folder?". The `disk_checkup` prompt runs a full checkup.
 
-Tools: `list_scans`, `browse`, `what_changed`, `largest_files`, `largest_folders`, `growth`,
-`cleanup_suggestions`, `run_scan` and `scan_status`. A scan an agent asks for runs in the
-DiskDiff app, which is started in the background if needed, so it gets the app's Full Disk
-Access and shows up in the sidebar. Only when no app can be started does the server scan by
-itself, with the agent's own permissions. Set `DISKDIFF_MCP_NO_APP=1` to always scan in the
-server.
+### Where diskdiff-cli is
 
-Agents that work through a shell can call the tools directly:
+| Install | Command |
+|---|---|
+| macOS | `DiskDiff.app/Contents/MacOS/diskdiff-cli` |
+| Windows | `%LOCALAPPDATA%\Programs\DiskDiff\diskdiff-cli.exe` |
+| .deb | `/usr/bin/diskdiff-cli` |
+| AppImage | `DiskDiff_<version>_amd64.AppImage cli …` (so the MCP server is `… cli mcp`) |
+
+### Tools
+
+`list_scans`, `browse`, `what_changed`, `largest_files`, `largest_folders`, `growth`,
+`cleanup_suggestions`, `run_scan` and `scan_status`, the same over MCP and the CLI, which
+prints them as JSON:
 
 ```sh
-diskdiff-mcp call what_changed '{"path": "~/Downloads"}'
-diskdiff-mcp tools    # every tool with its arguments
+diskdiff-cli call what_changed '{"path": "~/Downloads"}'
+diskdiff-cli tools            # every tool with its arguments
+diskdiff-cli report           # the Copy for AI report
+diskdiff-cli guide            # the agent how-to
 ```
+
+A scan an agent asks for runs in the DiskDiff app, which is started in the background if
+needed, so it gets the app's Full Disk Access and shows up in the sidebar. Only when no app can
+be started does `diskdiff-cli` scan by itself, with the agent's own permissions. Set
+`DISKDIFF_MCP_NO_APP=1` to always scan in `diskdiff-cli`.
 
 ## Running
 
@@ -107,7 +141,7 @@ cargo run -p diskdiff                 # debug
 open target/DiskDiff.app
 ```
 
-On Windows and Linux, `cargo build --release -p diskdiff -p diskdiff-mcp` builds both
+On Windows and Linux, `cargo build --release -p diskdiff -p diskdiff-cli` builds both
 binaries (`build.sh` is macOS-only for packaging). Linux needs `pkg-config clang
 libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
 libxcb1-dev libx11-xcb-dev libvulkan-dev libssl-dev` first.

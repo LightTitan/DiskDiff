@@ -155,7 +155,7 @@ fn app_scan(ctx: &Ctx, root: &Path, temporary: bool) -> Result<Option<u64>> {
             return started(ipc::request(store, &req)?).map(Some);
         }
     }
-    eprintln!("diskdiff-mcp: started DiskDiff but it did not answer within {LAUNCH_TIMEOUT:?}; scanning here");
+    eprintln!("diskdiff-cli: started DiskDiff but it did not answer within {LAUNCH_TIMEOUT:?}; scanning here");
     Ok(None)
 }
 

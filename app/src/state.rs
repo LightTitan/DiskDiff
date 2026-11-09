@@ -57,6 +57,11 @@ pub struct ScanJob {
 pub struct Toast {
     pub title: SharedString,
     pub detail: Option<SharedString>,
+    /// A path under the detail: one line shortened from the start, or in
+    /// full (wrapped at its separators) once clicked.
+    pub path: Option<SharedString>,
+    /// The path is shown in full; the toast then stays until dismissed.
+    pub expanded: bool,
     pub id: u64,
 }
 
@@ -344,8 +349,24 @@ impl AppState {
 
     pub fn notify_toast(&mut self, title: impl Into<SharedString>, detail: Option<SharedString>, cx: &mut Context<Self>) {
         self.counter += 1;
-        self.toast = Some(Toast { title: title.into(), detail, id: self.counter });
+        self.toast = Some(Toast { title: title.into(), detail, path: None, expanded: false, id: self.counter });
         cx.notify();
+    }
+
+    /// A toast about a file or folder: the path gets its own shortened line.
+    pub fn notify_toast_path(&mut self, title: impl Into<SharedString>, path: &Path, cx: &mut Context<Self>) {
+        self.counter += 1;
+        let path = Some(wrappable_path(path).into());
+        self.toast = Some(Toast { title: title.into(), detail: None, path, expanded: false, id: self.counter });
+        cx.notify();
+    }
+
+    /// Shows the toast's full path, or shortens it again.
+    pub fn toggle_toast_path(&mut self, cx: &mut Context<Self>) {
+        if let Some(t) = &mut self.toast {
+            t.expanded = !t.expanded;
+            cx.notify();
+        }
     }
 
     pub fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
@@ -530,5 +551,34 @@ pub fn file_manager() -> &'static str {
         "Finder"
     } else {
         "file manager"
+    }
+}
+
+/// A path that can wrap at its separators: a zero-width space after each `/`
+/// (and `\` on Windows) gives the text layout a place to break a path that
+/// is otherwise one long word. Display only; never use it as a path.
+pub fn wrappable_path(path: &Path) -> String {
+    let mut out = String::new();
+    for c in path.display().to_string().chars() {
+        out.push(c);
+        if c == '/' || (cfg!(windows) && c == '\\') {
+            out.push('\u{200B}');
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::wrappable_path;
+    // `gpui_kit::*` brings its own `test` macro; use the standard one.
+    use core::prelude::v1::test;
+    use std::path::Path;
+
+    #[test]
+    fn paths_can_wrap_after_each_separator_and_read_the_same() {
+        let shown = wrappable_path(Path::new("/data/Projects/app/node_modules"));
+        assert_eq!(shown.matches('\u{200B}').count(), 4);
+        assert_eq!(shown.replace('\u{200B}', ""), "/data/Projects/app/node_modules");
     }
 }

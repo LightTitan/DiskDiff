@@ -252,6 +252,18 @@ impl InsightsView {
             }))
             .child(div().flex_1())
             .when_some(context, |el, c| el.child(div().mr(px(14.)).text_size(px(12.)).text_color(p.dim).child(c)))
+            .when(cur.is_some(), |el| {
+                let state = self.state.clone();
+                el.child(
+                    Button::new("copy-for-ai")
+                        .small()
+                        .mr(px(8.))
+                        .icon(Icon::new(IconName::Copy))
+                        .label("Copy for AI")
+                        .tooltip("Copy these insights as text to paste into any AI chat")
+                        .on_click(move |_, _, cx| copy_for_ai(state.clone(), cx)),
+                )
+            })
             .child(Button::new("back-to-files").small().icon(Icon::new(IconName::ArrowLeft)).label("Back to files").on_click({
                 let state = self.state.clone();
                 move |_, _, cx| state.update(cx, |s, cx| s.set_screen(Screen::Files, cx))
@@ -898,4 +910,42 @@ fn message(p: &Palette, text: impl Into<SharedString>) -> impl IntoElement {
 
 fn error(p: &Palette, text: String) -> impl IntoElement {
     div().px(px(12.)).py(px(8.)).rounded(px(6.)).bg(p.up.opacity(0.14)).text_color(p.up).text_size(px(12.)).child(text)
+}
+
+/// Copies the current scan's insights (changes since the compared scan,
+/// cleanup suggestions minus the hidden ones, largest items) as Markdown,
+/// for pasting into an AI chat when no agent is connected to DiskDiff.
+pub fn copy_for_ai(state: Entity<AppState>, cx: &mut App) {
+    let s = state.read(cx);
+    let Some(cur) = s.current_scan().cloned() else {
+        return;
+    };
+    let cmp = s.compare_scan().cloned().filter(|_| s.comparing() && !cur.temporary);
+    let (store, scans) = (s.store.clone(), s.scans.clone());
+    let root = cur.root.clone();
+    let hidden = s.settings.hidden.clone();
+    let task = cx.background_executor().spawn(async move {
+        let is_hidden = |f: &Finding| {
+            let path = f.path.to_string_lossy();
+            hidden.iter().any(|(r, k, p)| *r == root && k == f.kind.key() && *p == path)
+        };
+        diskdiff_cli::report::markdown(&store, &scans, &cur, cmp.as_ref(), &is_hidden)
+    });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| match result {
+            Ok(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                state.update(cx, |s, cx| {
+                    s.notify_toast(
+                        "Copied for AI",
+                        Some("Paste it into any AI chat. It includes folder and file names from this scan.".into()),
+                        cx,
+                    )
+                });
+            }
+            Err(e) => state.update(cx, |s, cx| s.notify_toast("Could not copy the insights", Some(format!("{e:#}").into()), cx)),
+        });
+    })
+    .detach();
 }

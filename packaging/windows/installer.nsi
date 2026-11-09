@@ -8,7 +8,7 @@
 ; Settings > Apps for uninstalling. Scans and settings live in
 ; %APPDATA%\DiskDiff Native and are kept when DiskDiff is uninstalled or
 ; updated. The fixed folder also keeps the path an AI agent's config points
-; at (diskdiff-mcp.exe) the same across updates.
+; at (diskdiff-cli.exe) the same across updates.
 
 Unicode true
 !include "MUI2.nsh"
@@ -74,10 +74,10 @@ Section "Install"
   SetShellVarContext current
   !insertmacro CloseApp
   SetOutPath "$INSTDIR"
-  ; If an AI agent is running diskdiff-mcp.exe, Windows keeps it locked and
+  ; If an AI agent is running diskdiff-cli.exe, Windows keeps it locked and
   ; NSIS offers to retry once the agent app is closed.
   File "${SRC}\diskdiff.exe"
-  File "${SRC}\diskdiff-mcp.exe"
+  File "${SRC}\diskdiff-cli.exe"
   File "..\..\LICENSE"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -106,7 +106,7 @@ Section "Uninstall"
   SetShellVarContext current
   !insertmacro CloseApp
   Delete "$INSTDIR\diskdiff.exe"
-  Delete "$INSTDIR\diskdiff-mcp.exe"
+  Delete "$INSTDIR\diskdiff-cli.exe"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"

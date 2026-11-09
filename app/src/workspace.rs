@@ -34,14 +34,15 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |this, state, cx| {
-            // Toasts dismiss themselves after 8 s.
+            // Toasts dismiss themselves after 8 s, unless their path was
+            // opened to read it in full.
             let id = state.read(cx).toast.as_ref().map(|t| t.id);
             if id.is_some() && id != this.toast_shown {
                 this.toast_shown = id;
                 cx.spawn(async move |_, cx| {
                     cx.background_executor().timer(Duration::from_secs(8)).await;
                     let _ = state.update(cx, |s, cx| {
-                        if s.toast.as_ref().map(|t| t.id) == id {
+                        if s.toast.as_ref().is_some_and(|t| Some(t.id) == id && !t.expanded) {
                             s.dismiss_toast(cx);
                         }
                     });
@@ -376,13 +377,43 @@ impl Workspace {
                     .flex()
                     .gap(px(10.))
                     .child(
+                        // min_w_0 + overflow_hidden: a long word (a path inside
+                        // an error message) is clipped at the edge instead of
+                        // pushing the close button out of the toast.
                         div()
                             .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .flex()
                             .flex_col()
                             .gap(px(5.))
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(t.title))
-                            .when_some(t.detail, |el, d| el.child(div().text_size(px(12.)).text_color(p.dim).child(d))),
+                            .when_some(t.detail, |el, d| el.child(div().text_size(px(12.)).text_color(p.dim).child(d)))
+                            .when_some(t.path, |el, path| {
+                                let state = self.state.clone();
+                                let line = div()
+                                    .id("toast-path")
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(p.dim)
+                                    .cursor_default()
+                                    .hover(|s| s.text_color(p.text))
+                                    // Only while shortened: a tooltip left over after the click
+                                    // would cover the path it just opened.
+                                    .when(!t.expanded, |el| {
+                                        el.tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new("Show the full path").build(window, cx)
+                                        })
+                                    })
+                                    .on_click(move |_, _, cx| state.update(cx, |s, cx| s.toggle_toast_path(cx)));
+                                // Shortened from the start, so the folder itself stays visible.
+                                let line = if t.expanded {
+                                    line
+                                } else {
+                                    line.whitespace_nowrap().overflow_hidden().text_ellipsis_start()
+                                };
+                                el.child(line.child(path))
+                            }),
                     )
                     .child(icon_button("toast-close", IconName::X, "Dismiss", move |_, cx| {
                         state.update(cx, |s, cx| s.dismiss_toast(cx))

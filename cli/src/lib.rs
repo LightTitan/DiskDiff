@@ -6,6 +6,7 @@
 
 pub mod format;
 pub mod protocol;
+pub mod report;
 mod scan;
 pub mod select;
 pub mod tools;

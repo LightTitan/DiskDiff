@@ -1,5 +1,5 @@
 [package]
-name = "diskdiff-mcp"
+name = "diskdiff-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

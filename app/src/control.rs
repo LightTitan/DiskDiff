@@ -1,4 +1,4 @@
-//! Lets an AI agent's MCP server (`diskdiff-mcp`) ask the running app to scan.
+//! Lets an AI agent's MCP server (`diskdiff-cli`) ask the running app to scan.
 //!
 //! The scan then runs here, with the app's Full Disk Access, its live
 //! progress in the window, the one-temporary-scan rule and the sidebar,
@@ -150,7 +150,7 @@ fn start(state: &Entity<AppState>, path: PathBuf, temporary: bool, cx: &mut App)
         if !temporary {
             s.set_location(path.clone(), cx);
         }
-        s.notify_toast("Scan requested by an AI agent", Some(path.display().to_string().into()), cx);
+        s.notify_toast_path("Scan requested by an AI agent", &path, cx);
         Some(job)
     });
     let Some(job) = started else {

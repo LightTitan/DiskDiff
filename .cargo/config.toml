@@ -1,4 +1,4 @@
 # Windows (MSVC): link the C runtime statically, so diskdiff.exe and
-# diskdiff-mcp.exe start on PCs without the Visual C++ Redistributable.
+# diskdiff-cli.exe start on PCs without the Visual C++ Redistributable.
 [target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = ["-C", "target-feature=+crt-static"]

@@ -51,7 +51,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
 
-      # Builds DiskDiff.app with diskdiff-mcp inside, and the DMG.
+      # Builds DiskDiff.app with diskdiff-cli inside, and the DMG.
       - run: ./build.sh --universal --dmg
 
       - uses: actions/upload-artifact@v4
@@ -70,7 +70,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
 
-      - run: cargo build --release --locked -p diskdiff -p diskdiff-mcp
+      - run: cargo build --release --locked -p diskdiff -p diskdiff-cli
 
       - name: Build the installer
         shell: pwsh
@@ -110,7 +110,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
 
-      - run: cargo build --release --locked -p diskdiff -p diskdiff-mcp
+      - run: cargo build --release --locked -p diskdiff -p diskdiff-cli
 
       - name: Build the .deb
         run: |
@@ -122,8 +122,8 @@ jobs:
         run: |
           app=target/AppDir
           install -Dm755 target/release/diskdiff "$app/usr/bin/diskdiff"
-          install -Dm755 target/release/diskdiff-mcp "$app/usr/bin/diskdiff-mcp"
-          strip "$app/usr/bin/diskdiff" "$app/usr/bin/diskdiff-mcp"
+          install -Dm755 target/release/diskdiff-cli "$app/usr/bin/diskdiff-cli"
+          strip "$app/usr/bin/diskdiff" "$app/usr/bin/diskdiff-cli"
           install -Dm755 packaging/linux/AppRun "$app/AppRun"
           install -Dm644 packaging/linux/diskdiff.desktop "$app/diskdiff.desktop"
           install -Dm644 packaging/linux/diskdiff.png "$app/diskdiff.png"

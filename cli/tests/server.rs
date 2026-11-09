@@ -3,7 +3,7 @@
 
 use diskdiff_engine::{Progress, Store, scan};
 use diskdiff_ipc as ipc;
-use diskdiff_mcp::{CallError, Config, Ctx, call, protocol};
+use diskdiff_cli::{CallError, Config, Ctx, call, protocol};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ impl Tmp {
     fn new(name: &str) -> Tmp {
         static N: AtomicUsize = AtomicUsize::new(0);
         let p = std::env::temp_dir()
-            .join(format!("diskdiff-mcp-{name}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+            .join(format!("diskdiff-cli-{name}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         Tmp(diskdiff_engine::platform::canonical_root(&p))
@@ -447,4 +447,35 @@ fn run_scan_through_the_app() {
     let r = ok(&c, "run_scan", json!({"path": root.to_string_lossy(), "wait_seconds": 60}));
     assert_eq!(r["runner"], "server", "{r:#}");
     assert_eq!(r["state"], "finished");
+}
+
+#[test]
+fn report_for_pasting_into_a_chat() {
+    let f = fixture("report");
+    let s = Store::open_shared(&f.store).unwrap();
+    let scans = s.scans().unwrap();
+    let (prev, cur) = (&scans[0], &scans[1]);
+    let text = diskdiff_cli::report::markdown(&s, &scans, cur, Some(prev), &|_| false).unwrap();
+    for heading in ["# Disk report for", "## What changed since", "## Cleanup suggestions", "## Largest folders", "## Largest files"] {
+        assert!(text.contains(heading), "{heading} missing:\n{text}");
+    }
+    // Paths are relative to the scan root; the move is a move, not new space.
+    assert!(text.contains("`Downloads/archive.zip` (file, new"), "{text}");
+    assert!(text.contains("`Movies/film.mp4` (file, 3.15 MB, moved here from `Downloads/film.mp4`)"), "{text}");
+    assert!(text.contains("`Project/node_modules`"), "the cache should be a suggestion:\n{text}");
+
+    // Suggestions dismissed in the app stay out; no comparison drops the changes.
+    let text = diskdiff_cli::report::markdown(&s, &scans, cur, None, &|_| true).unwrap();
+    assert!(!text.contains("## What changed"), "{text}");
+    assert!(text.contains("No large caches"), "{text}");
+}
+
+#[test]
+fn guide_and_skill_name_the_command() {
+    let guide = diskdiff_cli::report::guide("\"/opt/app/diskdiff-cli\"");
+    assert!(guide.contains("\"/opt/app/diskdiff-cli\" call what_changed '{\"path\": \"~/Downloads\"}'"), "{guide}");
+    assert!(guide.contains("never deletes or moves files"), "{guide}");
+    let skill = diskdiff_cli::report::skill("diskdiff-cli");
+    assert!(skill.starts_with("---\nname: diskdiff\ndescription: \""), "{skill}");
+    assert!(skill.contains("\n---\n\n# DiskDiff"), "{skill}");
 }

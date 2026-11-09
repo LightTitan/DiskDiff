@@ -1,6 +1,6 @@
 #!/bin/zsh
-# Builds DiskDiff.app into target/DiskDiff.app, with the agent server
-# (diskdiff-mcp) inside it at Contents/MacOS/diskdiff-mcp.
+# Builds DiskDiff.app into target/DiskDiff.app, with the AI agent tool
+# (diskdiff-cli) inside it at Contents/MacOS/diskdiff-cli.
 #
 #   ./build.sh            release build
 #   ./build.sh --debug    debug build (faster to compile, slower to run)
@@ -11,8 +11,8 @@
 #
 # Flags combine, e.g. `./build.sh --install --open` or `./build.sh --universal --dmg`.
 # Elsewhere (Linux with zsh installed) it only builds the two binaries,
-# diskdiff and diskdiff-mcp, into target/<profile>/; on Windows run
-# `cargo build --release -p diskdiff -p diskdiff-mcp`. CI packages both.
+# diskdiff and diskdiff-cli, into target/<profile>/; on Windows run
+# `cargo build --release -p diskdiff -p diskdiff-cli`. CI packages both.
 #
 # A real bundle matters on macOS: Full Disk Access is granted per app, and a
 # bare binary launched from a terminal borrows the terminal's permissions.
@@ -36,14 +36,14 @@ for arg in "$@"; do
   esac
 done
 
-bins=(diskdiff diskdiff-mcp)
-cargo_flags=(-p diskdiff -p diskdiff-mcp)
+bins=(diskdiff diskdiff-cli)
+cargo_flags=(-p diskdiff -p diskdiff-cli)
 [[ $profile == release ]] && cargo_flags+=(--release)
 
 if [[ $(uname) != Darwin ]]; then
   # No bundle outside macOS; the binaries are the app.
   cargo build $cargo_flags
-  echo "built target/$profile/diskdiff and target/$profile/diskdiff-mcp"
+  echo "built target/$profile/diskdiff and target/$profile/diskdiff-cli"
   exit 0
 fi
 
@@ -74,7 +74,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$out/diskdiff" "$APP/Contents/MacOS/DiskDiff"
 # Next to the app's own binary, so agents can be pointed at one stable path
 # inside the installed app.
-cp "$out/diskdiff-mcp" "$APP/Contents/MacOS/diskdiff-mcp"
+cp "$out/diskdiff-cli" "$APP/Contents/MacOS/diskdiff-cli"
 cp app/icon/DiskDiff.icns "$APP/Contents/Resources/DiskDiff.icns"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$APP/Contents/Info.plist" <<PLIST

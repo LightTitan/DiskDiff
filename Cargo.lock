@@ -1364,6 +1364,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
+ "diskdiff-cli",
  "diskdiff-engine",
  "diskdiff-ipc",
  "embed-resource",
@@ -1380,11 +1381,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "diskdiff-cli"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "diskdiff-engine",
+ "diskdiff-ipc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "diskdiff-engine"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
+ "dunce",
  "libc",
  "parking_lot",
  "rayon",
@@ -1399,17 +1412,6 @@ dependencies = [
 name = "diskdiff-ipc"
 version = "0.3.0"
 dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "diskdiff-mcp"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "diskdiff-engine",
- "diskdiff-ipc",
  "serde",
  "serde_json",
 ]
