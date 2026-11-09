@@ -1,0 +1,10 @@
+#!/bin/sh
+# AppImage entry point. `DiskDiff.AppImage mcp …` runs the AI agent server
+# (that's what Help > Copy AI agent setup puts in an MCP client's config);
+# anything else starts the app.
+HERE="$(dirname "$(readlink -f "$0")")"
+if [ "${1:-}" = "mcp" ]; then
+  shift
+  exec "$HERE/usr/bin/diskdiff-mcp" "$@"
+fi
+exec "$HERE/usr/bin/diskdiff" "$@"

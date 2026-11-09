@@ -1,8 +1,8 @@
 name: Release
 
-# Builds DiskDiff for macOS (one universal app for Apple silicon and Intel),
-# Windows (x64 zip) and Linux (x86_64 tarball), and attaches all three to one
-# draft GitHub release. Runs when a version tag (v*) is pushed, or manually.
+# Builds DiskDiff for macOS (a DMG with one universal app for Apple silicon
+# and Intel), Windows (a per-user setup.exe) and Linux (an AppImage and a
+# .deb), and attaches them to one draft GitHub release. Runs when a version tag (v*) is pushed, or manually.
 #
 # The build jobs only upload workflow artifacts; a single last job creates
 # the draft and attaches everything, so parallel jobs never race to create
@@ -70,28 +70,30 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
 
-      # .cargo/config.toml links the C runtime statically; build.rs embeds the icon.
       - run: cargo build --release --locked -p diskdiff -p diskdiff-mcp
 
-      - name: Package
+      - name: Build the installer
         shell: pwsh
         run: |
-          $name = "DiskDiff_${{ needs.version.outputs.version }}_windows_x64"
-          $stage = "target/stage/$name"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item target/release/diskdiff.exe, target/release/diskdiff-mcp.exe, LICENSE -Destination $stage
-          Copy-Item packaging/windows/README.txt -Destination $stage
-          Compress-Archive -Path $stage -DestinationPath "target/$name.zip" -Force
+          # NSIS (the tool behind most Windows setup programs); install it if
+          # the runner image doesn't have it.
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $nsis)) {
+            choco install nsis -y --no-progress
+          }
+          $version = "${{ needs.version.outputs.version }}"
+          & $nsis /V3 "/DVERSION=$version" "/DSRC=$PWD\target\release" `
+            "/DOUT=$PWD\target\DiskDiff_${version}_x64-setup.exe" packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: target/DiskDiff_${{ needs.version.outputs.version }}_windows_x64.zip
+          path: target/DiskDiff_${{ needs.version.outputs.version }}_x64-setup.exe
           if-no-files-found: error
 
   linux:
     needs: version
-    # The oldest supported runner, so the binaries need only glibc 2.35.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -110,22 +112,36 @@ jobs:
 
       - run: cargo build --release --locked -p diskdiff -p diskdiff-mcp
 
-      - name: Package
+      - name: Build the .deb
         run: |
-          name="DiskDiff_${{ needs.version.outputs.version }}_linux_x86_64"
-          stage="target/stage/$name"
-          mkdir -p "$stage"
-          install -m 755 target/release/diskdiff target/release/diskdiff-mcp "$stage/"
-          strip "$stage/diskdiff" "$stage/diskdiff-mcp"
-          install -m 755 packaging/linux/install.sh "$stage/"
-          install -m 644 packaging/linux/diskdiff.desktop packaging/linux/diskdiff.png \
-            packaging/linux/INSTALL.txt LICENSE "$stage/"
-          tar -czf "target/$name.tar.gz" -C target/stage "$name"
+          cargo install cargo-deb --locked --version 3.7.0
+          cargo deb -p diskdiff --no-build \
+            --output "target/DiskDiff_${{ needs.version.outputs.version }}_amd64.deb"
+
+      - name: Build the AppImage
+        run: |
+          app=target/AppDir
+          install -Dm755 target/release/diskdiff "$app/usr/bin/diskdiff"
+          install -Dm755 target/release/diskdiff-mcp "$app/usr/bin/diskdiff-mcp"
+          strip "$app/usr/bin/diskdiff" "$app/usr/bin/diskdiff-mcp"
+          install -Dm755 packaging/linux/AppRun "$app/AppRun"
+          install -Dm644 packaging/linux/diskdiff.desktop "$app/diskdiff.desktop"
+          install -Dm644 packaging/linux/diskdiff.png "$app/diskdiff.png"
+          install -Dm644 packaging/linux/diskdiff.desktop "$app/usr/share/applications/diskdiff.desktop"
+          install -Dm644 packaging/linux/diskdiff.png "$app/usr/share/icons/hicolor/512x512/apps/diskdiff.png"
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          # The runner has no FUSE: let the tool unpack itself instead of mounting.
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool "$app" \
+            "target/DiskDiff_${{ needs.version.outputs.version }}_amd64.AppImage"
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: target/DiskDiff_${{ needs.version.outputs.version }}_linux_x86_64.tar.gz
+          path: |
+            target/DiskDiff_${{ needs.version.outputs.version }}_amd64.deb
+            target/DiskDiff_${{ needs.version.outputs.version }}_amd64.AppImage
           if-no-files-found: error
 
   release:
@@ -152,13 +168,15 @@ jobs:
             | Download | Status |
             |---|---|
             | `DiskDiff_${{ needs.version.outputs.version }}_universal.dmg` (macOS) | Tested |
-            | `DiskDiff_${{ needs.version.outputs.version }}_windows_x64.zip` (Windows) | **Untested**: built automatically but not yet tried on a real PC |
-            | `DiskDiff_${{ needs.version.outputs.version }}_linux_x86_64.tar.gz` (Linux) | **Untested**: built automatically but not yet tried on a real PC |
+            | `DiskDiff_${{ needs.version.outputs.version }}_x64-setup.exe` (Windows installer) | **Untested**: built automatically but not yet tried on a real PC |
+            | `DiskDiff_${{ needs.version.outputs.version }}_amd64.AppImage` (Linux, any distribution) | **Untested**: built automatically but not yet tried on a real PC |
+            | `DiskDiff_${{ needs.version.outputs.version }}_amd64.deb` (Ubuntu, Debian) | **Untested**: built automatically but not yet tried on a real PC |
 
             Windows and Linux support is new. Please report anything that doesn't work in an issue.
           draft: true
           files: |
             dist/DiskDiff_${{ needs.version.outputs.version }}_universal.dmg
-            dist/DiskDiff_${{ needs.version.outputs.version }}_windows_x64.zip
-            dist/DiskDiff_${{ needs.version.outputs.version }}_linux_x86_64.tar.gz
+            dist/DiskDiff_${{ needs.version.outputs.version }}_x64-setup.exe
+            dist/DiskDiff_${{ needs.version.outputs.version }}_amd64.AppImage
+            dist/DiskDiff_${{ needs.version.outputs.version }}_amd64.deb
           fail_on_unmatched_files: false

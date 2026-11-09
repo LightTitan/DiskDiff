@@ -27,3 +27,25 @@ objc2-foundation = "0.3"
 # machine doing the build, like build.rs's own cfg.
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
+
+# The Linux .deb, built by `cargo deb -p diskdiff --no-build` in the release
+# workflow after both binaries are built.
+[package.metadata.deb]
+name = "diskdiff"
+maintainer = "LightTitan <100202261+LightTitan@users.noreply.github.com>"
+copyright = "DiskDiff contributors"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+DiskDiff scans your disk over time and shows what changed between scans: \
+which folders grew, what was added, moved or deleted, and where your free \
+space went. Includes diskdiff-mcp, a server that lets AI agents read your \
+scan history."""
+section = "utils"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/diskdiff", "usr/bin/", "755"],
+    ["target/release/diskdiff-mcp", "usr/bin/", "755"],
+    ["../packaging/linux/diskdiff.desktop", "usr/share/applications/", "644"],
+    ["../packaging/linux/diskdiff.png", "usr/share/icons/hicolor/512x512/apps/diskdiff.png", "644"],
+]

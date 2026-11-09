@@ -346,11 +346,21 @@ fn file_manager_title() -> &'static str {
 
 /// Copies the MCP client config that runs `diskdiff-mcp`, which ships next
 /// to the app's executable (inside the bundle on macOS).
+///
+/// Linux AppImage: the app runs from a temporary mount that disappears when
+/// it quits, so the config runs the `.AppImage` file itself with `mcp`, which
+/// its AppRun hands to `diskdiff-mcp` (see packaging/linux/AppRun).
 fn copy_agent_setup(state: &Entity<AppState>, cx: &mut App) {
-    let server = std::env::current_exe().ok().map(|exe| mcp_server_path(&exe));
-    let found = server.as_ref().is_some_and(|p| p.is_file());
-    let server = server.unwrap_or_else(|| mcp_server_name().into());
-    cx.write_to_clipboard(ClipboardItem::new_string(agent_setup_json(&server)));
+    let (json, found) = match std::env::var_os("APPIMAGE").map(std::path::PathBuf::from) {
+        Some(image) => (agent_setup_json(&image, &["mcp"]), image.is_file()),
+        None => {
+            let server = std::env::current_exe().ok().map(|exe| mcp_server_path(&exe));
+            let found = server.as_ref().is_some_and(|p| p.is_file());
+            let server = server.unwrap_or_else(|| mcp_server_name().into());
+            (agent_setup_json(&server, &[]), found)
+        }
+    };
+    cx.write_to_clipboard(ClipboardItem::new_string(json));
     let detail = if found {
         "Paste it into your MCP client’s config, e.g. Claude Desktop."
     } else {
@@ -367,9 +377,14 @@ fn mcp_server_path(exe: &std::path::Path) -> std::path::PathBuf {
     exe.with_file_name(mcp_server_name())
 }
 
-/// `{"mcpServers":{"diskdiff":{"command":"…"}}}`, pretty-printed for pasting.
-fn agent_setup_json(server: &std::path::Path) -> String {
-    let config = serde_json::json!({ "mcpServers": { "diskdiff": { "command": server.to_string_lossy() } } });
+/// `{"mcpServers":{"diskdiff":{"command":"…"}}}` (plus `args` when given),
+/// pretty-printed for pasting.
+fn agent_setup_json(server: &std::path::Path, args: &[&str]) -> String {
+    let mut entry = serde_json::json!({ "command": server.to_string_lossy() });
+    if !args.is_empty() {
+        entry["args"] = serde_json::json!(args);
+    }
+    let config = serde_json::json!({ "mcpServers": { "diskdiff": entry } });
     serde_json::to_string_pretty(&config).unwrap_or_default()
 }
 
@@ -412,7 +427,14 @@ mod tests {
         assert_eq!(server.parent(), exe.parent());
         assert_eq!(server.file_name().unwrap(), mcp_server_name());
 
-        let json: serde_json::Value = serde_json::from_str(&agent_setup_json(Path::new("/opt/app/diskdiff-mcp"))).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&agent_setup_json(Path::new("/opt/app/diskdiff-mcp"), &[])).unwrap();
         assert_eq!(json["mcpServers"]["diskdiff"]["command"], "/opt/app/diskdiff-mcp");
+        assert!(json["mcpServers"]["diskdiff"].get("args").is_none());
+
+        // An AppImage runs the image file itself, which hands `mcp` to the server.
+        let json: serde_json::Value =
+            serde_json::from_str(&agent_setup_json(Path::new("/opt/apps/DiskDiff.AppImage"), &["mcp"])).unwrap();
+        assert_eq!(json["mcpServers"]["diskdiff"]["command"], "/opt/apps/DiskDiff.AppImage");
+        assert_eq!(json["mcpServers"]["diskdiff"]["args"], serde_json::json!(["mcp"]));
     }
 }

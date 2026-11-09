@@ -37,22 +37,27 @@ scans lose access after updating, remove DiskDiff from that list and add it agai
 
 ### Windows
 
-Download `DiskDiff_<version>_windows_x64.zip` from
-[Releases](https://github.com/LightTitan/DiskDiff/releases), unzip it anywhere and run
-`diskdiff.exe`. There is no installer. The app isn't signed, so SmartScreen may ask you to
-confirm the first time (**More info**, then **Run anyway**). Some system folders can only be
-read by an administrator: run DiskDiff as administrator to include them. OneDrive files that
-are online only are never downloaded and count as the space they take on your PC.
+Download `DiskDiff_<version>_x64-setup.exe` from
+[Releases](https://github.com/LightTitan/DiskDiff/releases) and run it. It installs DiskDiff for
+your user only (no administrator rights needed) and adds it to the Start menu, optionally with a
+desktop shortcut. Uninstall it under Settings → Apps; your scans in `%APPDATA%\DiskDiff Native`
+are kept. The installer isn't signed, so SmartScreen may ask you to confirm the first time
+(**More info**, then **Run anyway**). Some system folders can only be read by an administrator:
+run DiskDiff as administrator to include them. OneDrive files that are online only are never
+downloaded and count as the space they take on your PC.
 
 ### Linux
 
-Download `DiskDiff_<version>_linux_x86_64.tar.gz`, unpack it and run `./install.sh`. It
-installs `diskdiff` and `diskdiff-mcp` to `~/.local/bin` and adds a menu entry, without root
-(`./install.sh --uninstall` removes them). You can also run `./diskdiff` straight from the
-folder. It needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later) and
-Wayland or X11. A scan of `/` stays on the root filesystem: on btrfs and ZFS that includes
-`/home` and other subvolumes or datasets, but never other disks, network shares, snapshots or
-tmpfs.
+Two downloads, both for x86_64 with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and
+later) and Wayland or X11:
+
+- `DiskDiff_<version>_amd64.AppImage` runs on any distribution: make it executable
+  (`chmod +x DiskDiff_*.AppImage`) and open it.
+- `DiskDiff_<version>_amd64.deb` installs DiskDiff on Ubuntu, Debian and their relatives
+  (`sudo apt install ./DiskDiff_*.deb`), with a menu entry.
+
+A scan of `/` stays on the root filesystem: on btrfs and ZFS that includes `/home` and other
+subvolumes or datasets, but never other disks, network shares, snapshots or tmpfs.
 
 ## Use with AI agents
 
@@ -62,8 +67,9 @@ history and start new scans. It reads the same store as the app and never delete
 files: an agent can tell you what to remove and why, and you decide.
 
 **Help → Copy AI agent setup** copies the config for your MCP client with the right path.
-On macOS the server is `DiskDiff.app/Contents/MacOS/diskdiff-mcp`; on Windows and Linux it
-sits next to `diskdiff`. For Claude Code:
+On macOS the server is `DiskDiff.app/Contents/MacOS/diskdiff-mcp`, on Windows
+`%LOCALAPPDATA%\Programs\DiskDiff\diskdiff-mcp.exe`, with the .deb `/usr/bin/diskdiff-mcp`. The
+AppImage runs it as `DiskDiff_<version>_amd64.AppImage mcp`. For Claude Code:
 
 ```sh
 claude mcp add diskdiff -- /Applications/DiskDiff.app/Contents/MacOS/diskdiff-mcp
@@ -179,8 +185,8 @@ Development hooks (environment variables, see `app/src/dev.rs`):
 
 1. Bump `version` in the root `Cargo.toml` and commit.
 2. Tag the commit and push the tag, e.g. `git tag v0.2.2 && git push origin v0.2.2`.
-3. The Release workflow builds the universal DMG, the Windows zip and the Linux tarball on
-   GitHub and attaches them to one draft release. Write the notes there and publish it.
+3. The Release workflow builds the universal DMG, the Windows installer and the Linux AppImage
+   and .deb on GitHub and attaches them to one draft release. Write the notes there and publish it.
 
 The workflow stops if the tag doesn't match the version in `Cargo.toml`. It can also be
 started by hand from the Actions tab, which drafts a release for the current version.

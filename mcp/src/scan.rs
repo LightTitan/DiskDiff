@@ -223,8 +223,12 @@ fn launch_app() -> bool {
         if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
             return false;
         }
+        // Run from an AppImage: start the image itself. The sibling binary
+        // lives in the image's temporary mount, which goes away with this
+        // server, taking a still-running app's files with it.
+        let image = std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).filter(|p| p.is_file());
         let sibling = exe.as_deref().and_then(Path::parent).map(|d| d.join("diskdiff")).filter(|p| p.exists());
-        let mut c = Command::new(sibling.unwrap_or_else(|| "diskdiff".into()));
+        let mut c = Command::new(image.or(sibling).unwrap_or_else(|| "diskdiff".into()));
         quiet(&mut c);
         c.spawn().is_ok()
     }
