@@ -110,7 +110,7 @@ pub fn markdown(
     files.sort_by_key(|f| std::cmp::Reverse(f.size));
     let _ = writeln!(w, "\n## Largest files\n");
     for f in files.iter().take(TOP) {
-        let _ = writeln!(w, "- {} `{}`", bytes(f.size), rel(&root.join(&f.path)));
+        let _ = writeln!(w, "- {} `{}`", bytes(f.size), rel(&f.abs(root)));
     }
 
     let _ = writeln!(

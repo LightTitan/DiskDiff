@@ -54,9 +54,21 @@ impl ScanInfo {
 
 #[derive(Clone, Debug)]
 pub struct LargeFile {
-    /// Path relative to the scan root, `/`-separated.
+    /// Path relative to the scan root, `/`-separated. Don't join it onto a
+    /// path directly (Windows would show `C:\Disk\Downloads/film.mp4`); use
+    /// [`LargeFile::abs`].
     pub path: String,
     pub size: u64,
+}
+
+impl LargeFile {
+    /// The absolute path under `root`, built part by part so it uses the
+    /// platform's own separator.
+    pub fn abs(&self, root: &Path) -> PathBuf {
+        let mut p = root.to_owned();
+        p.extend(self.path.split('/').filter(|s| !s.is_empty()));
+        p
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -474,5 +486,21 @@ impl NodeCache {
     }
     fn clear(&mut self) {
         self.map.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LargeFile;
+    use std::path::Path;
+
+    #[test]
+    fn large_file_paths_use_the_platform_separator() {
+        let f = LargeFile { path: "Downloads/media/film.mp4".into(), size: 1 };
+        let abs = f.abs(Path::new("base"));
+        assert_eq!(abs, Path::new("base").join("Downloads").join("media").join("film.mp4"));
+        // The text form matters too: it's shown, written to JSON and compared.
+        let other = if cfg!(windows) { '/' } else { '\\' };
+        assert!(!abs.to_string_lossy().contains(other), "{}", abs.display());
     }
 }

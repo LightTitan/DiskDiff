@@ -3,7 +3,8 @@ name: CI
 # Builds and tests the whole workspace on macOS, Windows and Linux.
 on:
   push:
-    branches: [main]
+    # ci/* branches exist to be tested on all three systems before a merge.
+    branches: [main, "ci/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -46,7 +47,9 @@ jobs:
       - run: cargo build --workspace --locked
 
       # The app's tests are plain unit tests; none opens a window.
-      - run: cargo test --workspace --locked
+      # --no-fail-fast: run every test program even after one fails, so a
+      # run shows all of a platform's failures at once, not one batch.
+      - run: cargo test --workspace --locked --no-fail-fast
 
       # Reports warnings without failing; only lints the crates deny fail.
       - run: cargo clippy --workspace --all-targets --locked

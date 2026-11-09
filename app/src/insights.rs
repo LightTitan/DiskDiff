@@ -155,7 +155,7 @@ impl Render for InsightsView {
                     self.ensure(cx, |t| &mut t.largest, (cur.id, version), move || {
                         let root = PathBuf::from(&cur2.root);
                         let mut files: Vec<(PathBuf, u64)> =
-                            store.largest_files(cur2.id)?.into_iter().map(|f| (root.join(&f.path), f.size)).collect();
+                            store.largest_files(cur2.id)?.into_iter().map(|f| (f.abs(&root), f.size)).collect();
                         files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                         let folders = insights::largest_folders(&store, &cur2, 1000)?;
                         Ok(Largest { files, folders })

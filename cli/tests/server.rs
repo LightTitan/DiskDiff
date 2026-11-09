@@ -100,12 +100,22 @@ fn find<'a>(items: &'a Value, key: &str, suffix: &str) -> &'a Value {
         .as_array()
         .unwrap()
         .iter()
-        .find(|i| i[key].as_str().is_some_and(|p| p.ends_with(suffix)))
+        .find(|i| i[key].as_str().is_some_and(|p| p.ends_with(&sep(suffix))))
         .unwrap_or_else(|| panic!("no {suffix} in {items:#}"))
 }
 
+/// `rel` written with `/`, in the platform's own spelling.
+fn sep(rel: &str) -> String {
+    rel.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
+
 fn p(root: &Path, rel: &str) -> String {
-    root.join(rel).to_string_lossy().into_owned()
+    root.join(sep(rel)).to_string_lossy().into_owned()
+}
+
+/// An absolute path no scan covers.
+fn elsewhere() -> &'static str {
+    if cfg!(windows) { r"C:\nowhere\else" } else { "/nowhere/else" }
 }
 
 #[test]
@@ -120,7 +130,7 @@ fn read_tools() {
     assert_eq!(scans["locations"][0]["scans"], 2);
     assert!(scans["scans"][0]["finished"].as_str().unwrap().ends_with('Z'));
     assert_eq!(ok(&c, "list_scans", json!({"root": p(&f.root, "Photos")}))["count"], 2);
-    assert_eq!(ok(&c, "list_scans", json!({"root": "/elsewhere"}))["count"], 0);
+    assert_eq!(ok(&c, "list_scans", json!({"root": elsewhere()}))["count"], 0);
 
     // The root, compared with the previous scan by default.
     let b = ok(&c, "browse", json!({"path": f.root.to_string_lossy()}));
@@ -202,7 +212,7 @@ fn errors_are_helpful() {
     assert!(err(&c, "browse", json!({"pth": "/x"})).contains("unknown argument `pth`"));
     assert!(err(&c, "browse", json!({"scan": 999})).contains("no scan with id 999"));
     assert!(err(&c, "browse", json!({"scan": "oldest"})).contains("\"latest\""));
-    assert!(err(&c, "browse", json!({"path": "/nowhere/else"})).contains("no scan covers"));
+    assert!(err(&c, "browse", json!({"path": elsewhere()})).contains("no scan covers"));
     assert!(err(&c, "browse", json!({"path": p(&f.root, "Movies/film.mp4")})).contains("is a file"));
     assert!(err(&c, "growth", json!({})).contains("missing required argument `path`"));
     assert!(err(&c, "run_scan", json!({"path": p(&f.root, "Downloads/archive.zip")})).contains("not a folder"));
@@ -460,9 +470,9 @@ fn report_for_pasting_into_a_chat() {
         assert!(text.contains(heading), "{heading} missing:\n{text}");
     }
     // Paths are relative to the scan root; the move is a move, not new space.
-    assert!(text.contains("`Downloads/archive.zip` (file, new"), "{text}");
-    assert!(text.contains("`Movies/film.mp4` (file, 3.15 MB, moved here from `Downloads/film.mp4`)"), "{text}");
-    assert!(text.contains("`Project/node_modules`"), "the cache should be a suggestion:\n{text}");
+    assert!(text.contains(&sep("`Downloads/archive.zip` (file, new")), "{text}");
+    assert!(text.contains(&sep("`Movies/film.mp4` (file, 3.15 MB, moved here from `Downloads/film.mp4`)")), "{text}");
+    assert!(text.contains(&sep("`Project/node_modules`")), "the cache should be a suggestion:\n{text}");
 
     // Suggestions dismissed in the app stay out; no comparison drops the changes.
     let text = diskdiff_cli::report::markdown(&s, &scans, cur, None, &|_| true).unwrap();

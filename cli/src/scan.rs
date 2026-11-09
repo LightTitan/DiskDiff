@@ -159,8 +159,13 @@ fn app_scan(ctx: &Ctx, root: &Path, temporary: bool) -> Result<Option<u64>> {
     Ok(None)
 }
 
+/// No app is listening: no endpoint file, or a stale one left by an app that
+/// crashed. Connecting to a closed loopback port is refused at once on macOS
+/// and Linux, but Windows retries for a few seconds, so there it shows up as a
+/// timeout (a running app's listener always answers loopback connects at once).
 fn absent(e: &std::io::Error) -> bool {
-    matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
+    use std::io::ErrorKind::{ConnectionRefused, NotFound, TimedOut};
+    matches!(e.kind(), NotFound | ConnectionRefused | TimedOut)
 }
 
 fn started(r: Response) -> Result<u64> {
