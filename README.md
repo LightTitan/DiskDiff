@@ -6,15 +6,19 @@ as a snapshot, so you can compare any two of them, browse a past scan like Finde
 folders that keep growing.
 
 It is a native app written in Rust, with the UI in [GPUI](https://www.gpui.rs) through
-gpui-kit. It runs on macOS 12 or later. The engine also builds on Windows, but the app is
-developed and tested on macOS.
+gpui-kit. It runs on macOS 12 or later, Windows 10 or later, and Linux. It is developed on
+macOS; Windows and Linux builds are new and less tested.
 
 | Crate | What |
 |---|---|
 | `engine` (`diskdiff-engine`) | Scanner, snapshot store, diffs, insights |
 | `app` (`diskdiff`) | The window: graph, comparison summary, column browser, insights, manage scans |
+| `mcp` (`diskdiff-mcp`) | MCP server and CLI that let AI agents read scans and request new ones |
+| `ipc` (`diskdiff-ipc`) | How other processes ask the running app to scan |
 
 ## Installing
+
+### macOS
 
 Download the DMG from [Releases](https://github.com/LightTitan/DiskDiff/releases) and drag
 DiskDiff into Applications. One build runs on both Apple silicon and Intel Macs.
@@ -31,6 +35,63 @@ To scan the whole disk, add DiskDiff under System Settings → Privacy & Securit
 Access. Each release is signed ad hoc, so macOS may treat an update as a different app: if
 scans lose access after updating, remove DiskDiff from that list and add it again.
 
+### Windows
+
+Download `DiskDiff_<version>_windows_x64.zip` from
+[Releases](https://github.com/LightTitan/DiskDiff/releases), unzip it anywhere and run
+`diskdiff.exe`. There is no installer. The app isn't signed, so SmartScreen may ask you to
+confirm the first time (**More info**, then **Run anyway**). Some system folders can only be
+read by an administrator: run DiskDiff as administrator to include them. OneDrive files that
+are online only are never downloaded and count as the space they take on your PC.
+
+### Linux
+
+Download `DiskDiff_<version>_linux_x86_64.tar.gz`, unpack it and run `./install.sh`. It
+installs `diskdiff` and `diskdiff-mcp` to `~/.local/bin` and adds a menu entry, without root
+(`./install.sh --uninstall` removes them). You can also run `./diskdiff` straight from the
+folder. It needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later) and
+Wayland or X11. A scan of `/` stays on the root filesystem: on btrfs and ZFS that includes
+`/home` and other subvolumes or datasets, but never other disks, network shares, snapshots or
+tmpfs.
+
+## Use with AI agents
+
+DiskDiff ships `diskdiff-mcp`, a [Model Context Protocol](https://modelcontextprotocol.io)
+server that lets AI agents such as Claude Desktop, Claude Code and Cursor read your scan
+history and start new scans. It reads the same store as the app and never deletes or moves
+files: an agent can tell you what to remove and why, and you decide.
+
+**Help → Copy AI agent setup** copies the config for your MCP client with the right path.
+On macOS the server is `DiskDiff.app/Contents/MacOS/diskdiff-mcp`; on Windows and Linux it
+sits next to `diskdiff`. For Claude Code:
+
+```sh
+claude mcp add diskdiff -- /Applications/DiskDiff.app/Contents/MacOS/diskdiff-mcp
+```
+
+For Claude Desktop (`claude_desktop_config.json`) or Cursor (`~/.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "diskdiff": { "command": "/Applications/DiskDiff.app/Contents/MacOS/diskdiff-mcp" } } }
+```
+
+Then ask things like "What grew on my disk since last week?" or "What could I safely clean up
+in my home folder?". The `disk_checkup` prompt runs a full checkup.
+
+Tools: `list_scans`, `browse`, `what_changed`, `largest_files`, `largest_folders`, `growth`,
+`cleanup_suggestions`, `run_scan` and `scan_status`. A scan an agent asks for runs in the
+DiskDiff app, which is started in the background if needed, so it gets the app's Full Disk
+Access and shows up in the sidebar. Only when no app can be started does the server scan by
+itself, with the agent's own permissions. Set `DISKDIFF_MCP_NO_APP=1` to always scan in the
+server.
+
+Agents that work through a shell can call the tools directly:
+
+```sh
+diskdiff-mcp call what_changed '{"path": "~/Downloads"}'
+diskdiff-mcp tools    # every tool with its arguments
+```
+
 ## Running
 
 ```sh
@@ -40,6 +101,11 @@ cargo run -p diskdiff                 # debug
 open target/DiskDiff.app
 ```
 
+On Windows and Linux, `cargo build --release -p diskdiff -p diskdiff-mcp` builds both
+binaries (`build.sh` is macOS-only for packaging). Linux needs `pkg-config clang
+libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
+libxcb1-dev libx11-xcb-dev libvulkan-dev libssl-dev` first.
+
 `--universal` needs the Intel and Apple silicon standard libraries
 (`rustup target add x86_64-apple-darwin aarch64-apple-darwin`).
 
@@ -48,7 +114,8 @@ binary started from a terminal borrows the terminal's permissions and may trigge
 prompts for Desktop, Documents and so on.
 
 Data lives in `~/Library/Application Support/app.diskdiff.native/` (`%APPDATA%\DiskDiff Native` on
-Windows): `snapshots.db` and `settings.json`.
+Windows, `~/.local/share/diskdiff` on Linux): `snapshots.db` and `settings.json`. While the app
+runs it also writes `snapshots.control.json`, the local endpoint agents use to request scans.
 
 ## How scans are stored
 
@@ -112,8 +179,8 @@ Development hooks (environment variables, see `app/src/dev.rs`):
 
 1. Bump `version` in the root `Cargo.toml` and commit.
 2. Tag the commit and push the tag, e.g. `git tag v0.2.2 && git push origin v0.2.2`.
-3. The Release workflow builds the universal DMG on GitHub and attaches it to a draft
-   release. Write the notes there and publish it.
+3. The Release workflow builds the universal DMG, the Windows zip and the Linux tarball on
+   GitHub and attaches them to one draft release. Write the notes there and publish it.
 
 The workflow stops if the tag doesn't match the version in `Cargo.toml`. It can also be
 started by hand from the Actions tab, which drafts a release for the current version.

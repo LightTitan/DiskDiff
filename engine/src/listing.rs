@@ -5,7 +5,17 @@
 //! their attributes per call instead of one `lstat` per entry. Windows gets
 //! sizes for free from `FindNextFile` through `std::fs::read_dir`. Elsewhere we
 //! fall back to `read_dir` + `symlink_metadata`.
+//!
+//! Rules every platform keeps, so a walk can never loop, double count, hang
+//! or download anything:
+//! - Symlinks are never followed (Unix: `lstat`/`d_type`; Windows: every
+//!   name-surrogate reparse point — symlinks, junctions, volume mount points —
+//!   is a symlink to std and comes back as [`Kind::Other`]).
+//! - Nothing is ever opened for reading. FIFOs, sockets and device files are
+//!   only seen through their directory entry and skipped.
+//! - Cloud placeholders are reported, never opened.
 
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::Path;
 
@@ -20,7 +30,12 @@ pub enum Kind {
 
 #[derive(Debug)]
 pub struct RawEntry {
+    /// The name as text, for storing and showing. Names that aren't valid
+    /// Unicode (possible on Linux) are converted lossily here.
     pub name: String,
+    /// The exact name on disk, for building the paths the walk opens, so a
+    /// folder with a non-Unicode name is still walked.
+    pub raw_name: OsString,
     pub kind: Kind,
     /// Allocated bytes on disk (files only).
     pub size: u64,
@@ -38,11 +53,33 @@ pub struct RawEntry {
     pub cloud: bool,
 }
 
+/// Extra choices for [`list_dir_with`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ListOptions<'a> {
+    /// Names in this folder to leave out without looking at them at all, not
+    /// even an `lstat`: mount points of other filesystems, where a dead
+    /// network share would hang the call and an autofs trigger would mount.
+    pub skip: &'a [OsString],
+    /// Read each file's exact hard-link count even where that costs a file
+    /// open (Windows; see [`crate::platform::wants_link_counts`]). On Unix
+    /// the count always comes with the entry's metadata.
+    pub link_counts: bool,
+}
+
+/// Lists `path` with default options.
+pub fn list_dir(path: &Path) -> io::Result<Vec<RawEntry>> {
+    list_dir_with(path, &ListOptions::default())
+}
+
 #[cfg(target_os = "macos")]
-pub use macos::list_dir;
+pub use macos::list_dir_with;
 
 #[cfg(not(target_os = "macos"))]
-pub use portable::list_dir;
+pub use portable::list_dir_with;
+
+fn skipped(opts: &ListOptions, name: &OsStr) -> bool {
+    !opts.skip.is_empty() && opts.skip.iter().any(|s| s == name)
+}
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -81,7 +118,7 @@ mod macos {
     const VREG: u32 = 1;
     const VDIR: u32 = 2;
 
-    pub fn list_dir(path: &Path) -> io::Result<Vec<RawEntry>> {
+    pub fn list_dir_with(path: &Path, opts: &ListOptions) -> io::Result<Vec<RawEntry>> {
         let c = CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
         let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
         if fd < 0 {
@@ -131,7 +168,9 @@ mod macos {
                 if len == 0 || p + len > buf.len() {
                     break;
                 }
-                if let Some(e) = parse(entry) {
+                // getattrlistbulk reports a mount point's attributes without
+                // entering it, so skipped names cost nothing extra here.
+                if let Some(e) = parse(entry).filter(|e| !skipped(opts, &e.raw_name)) {
                     out.push(e);
                 }
                 p += len;
@@ -163,12 +202,14 @@ mod macos {
             }
         }
         let mut name = String::new();
+        let mut raw_name = OsString::new();
         if common & ATTR_CMN_NAME != 0 {
             let off = i32::from_ne_bytes(e[p..p + 4].try_into().unwrap()) as isize;
             let len = rd_u32(e, p + 4) as usize;
             let start = (p as isize + off) as usize;
             let raw = e.get(start..start + len.saturating_sub(1))?;
             name = String::from_utf8_lossy(raw).into_owned();
+            raw_name = OsStr::from_bytes(raw).to_owned();
             p += 8;
         }
         let mut dev = 0;
@@ -210,7 +251,7 @@ mod macos {
             VDIR => Kind::Dir,
             _ => Kind::Other,
         };
-        Some(RawEntry { name, kind, size, logical, dev, ino, nlink, cloud: flags & SF_DATALESS != 0 })
+        Some(RawEntry { name, raw_name, kind, size, logical, dev, ino, nlink, cloud: flags & SF_DATALESS != 0 })
     }
 }
 
@@ -219,62 +260,134 @@ pub mod portable {
     use super::*;
 
     pub fn list_dir(path: &Path) -> io::Result<Vec<RawEntry>> {
+        list_dir_with(path, &ListOptions::default())
+    }
+
+    pub fn list_dir_with(path: &Path, opts: &ListOptions) -> io::Result<Vec<RawEntry>> {
         let mut out = Vec::new();
         for entry in std::fs::read_dir(path)? {
             let Ok(entry) = entry else { continue };
-            let Ok(ft) = entry.file_type() else { continue };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if ft.is_dir() {
-                let dev = dev_of(&entry);
-                let cloud = is_cloud(&entry);
-                out.push(RawEntry { name, kind: Kind::Dir, size: 0, logical: 0, dev, ino: 0, nlink: 1, cloud });
-            } else if ft.is_file() {
-                let Ok(md) = entry.metadata() else { continue };
-                let (size, dev, ino, nlink) = file_facts(&md);
-                out.push(RawEntry { name, kind: Kind::File, size, logical: md.len(), dev, ino, nlink, cloud: false });
+            let raw_name = entry.file_name();
+            if skipped(opts, &raw_name) {
+                continue;
             }
+            // From the directory entry itself (`d_type` on Linux, the find
+            // data on Windows); symlinks and reparse points are neither dirs
+            // nor files here, so they're never followed.
+            let Ok(ft) = entry.file_type() else { continue };
+            let name = raw_name.to_string_lossy().into_owned();
+            let e = if ft.is_dir() {
+                dir_entry(&entry, name, raw_name)
+            } else if ft.is_file() {
+                file_entry(&entry, name, raw_name, opts)
+            } else {
+                // Symlinks, FIFOs, sockets, devices: left out untouched.
+                None
+            };
+            out.extend(e);
         }
         Ok(out)
     }
 
+    /// Unix: `DirEntry::metadata` is an `lstat` relative to the open
+    /// directory, so it never follows a link. Its device and inode let the
+    /// walk stop at mount points and notice a folder reached twice.
     #[cfg(unix)]
-    fn dev_of(entry: &std::fs::DirEntry) -> u64 {
+    fn dir_entry(entry: &std::fs::DirEntry, name: String, raw_name: OsString) -> Option<RawEntry> {
         use std::os::unix::fs::MetadataExt;
-        entry.metadata().map(|m| m.dev()).unwrap_or(0)
+        let (dev, ino) = entry.metadata().map_or((0, 0), |m| (m.dev(), m.ino()));
+        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev, ino, nlink: 1, cloud: false })
     }
 
-    #[cfg(not(unix))]
-    fn dev_of(_: &std::fs::DirEntry) -> u64 {
-        0
+    #[cfg(unix)]
+    fn file_entry(entry: &std::fs::DirEntry, name: String, raw_name: OsString, _: &ListOptions) -> Option<RawEntry> {
+        use std::os::unix::fs::MetadataExt;
+        let md = entry.metadata().ok()?;
+        Some(RawEntry {
+            name,
+            raw_name,
+            kind: Kind::File,
+            // Allocated blocks: sparse files count what they use, swap files
+            // and preallocated files what they reserve.
+            size: md.blocks() * 512,
+            logical: md.len(),
+            dev: md.dev(),
+            ino: md.ino(),
+            nlink: md.nlink() as u32,
+            cloud: false,
+        })
     }
 
-    /// Windows cloud files (OneDrive, Google Drive…): the find data already
-    /// carries the attributes, so asking costs no file open.
+    /// Windows attribute bits from the find data.
     #[cfg(windows)]
-    fn is_cloud(entry: &std::fs::DirEntry) -> bool {
+    mod attr {
+        pub const REPARSE_POINT: u32 = 0x0000_0400;
+        pub const SPARSE: u32 = 0x0000_0200;
+        pub const COMPRESSED: u32 = 0x0000_0800;
+        pub const OFFLINE: u32 = 0x0000_1000;
+        pub const RECALL_ON_OPEN: u32 = 0x0004_0000;
+        pub const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+        /// OneDrive, Google Drive and other cloud-files placeholders: the
+        /// contents aren't on this disk, and opening one would recall it.
+        pub const CLOUD: u32 = OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS;
+    }
+
+    /// Windows: `DirEntry::metadata` comes from the `FindNextFileW` data that
+    /// `read_dir` already has — no file is opened, so it can't fail on files
+    /// in use (`pagefile.sys`, `hiberfil.sys`) and can't recall cloud files.
+    #[cfg(windows)]
+    fn dir_entry(entry: &std::fs::DirEntry, name: String, raw_name: OsString) -> Option<RawEntry> {
         use std::os::windows::fs::MetadataExt;
-        const RECALL_ON_OPEN: u32 = 0x0004_0000;
-        const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-        entry.metadata().is_ok_and(|m| m.file_attributes() & (RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0)
+        let attrs = entry.metadata().map_or(0, |m| m.file_attributes());
+        let cloud = attrs & (attr::RECALL_ON_OPEN | attr::RECALL_ON_DATA_ACCESS) != 0;
+        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev: 0, ino: 0, nlink: 1, cloud })
     }
 
-    #[cfg(not(windows))]
-    fn is_cloud(_: &std::fs::DirEntry) -> bool {
-        false
+    /// Windows: the find data has the length and attributes but not the
+    /// allocated size or link count.
+    /// - Cloud placeholders take (almost) nothing on this disk: 0.
+    /// - Compressed (NTFS, or CompactOS/WOF, which shows as a reparse point),
+    ///   sparse and deduplicated files ask for their real on-disk size; only
+    ///   those few files pay for the call.
+    /// - Everything else: the length rounded up to the usual 4 KiB cluster.
+    /// - Link counts only when asked (see [`ListOptions::link_counts`]); the
+    ///   open reads attributes only and doesn't follow reparse points.
+    #[cfg(windows)]
+    fn file_entry(entry: &std::fs::DirEntry, name: String, raw_name: OsString, opts: &ListOptions) -> Option<RawEntry> {
+        use crate::platform::win;
+        use std::os::windows::fs::MetadataExt;
+        let md = entry.metadata().ok()?;
+        let attrs = md.file_attributes();
+        let logical = md.len();
+        let cloud = attrs & attr::CLOUD != 0;
+        let rounded = |n: u64| n.div_ceil(4096) * 4096;
+        let size = if cloud {
+            0
+        } else if attrs & (attr::COMPRESSED | attr::SPARSE | attr::REPARSE_POINT) != 0 {
+            win::compressed_size(&entry.path()).map_or(rounded(logical), rounded)
+        } else {
+            rounded(logical)
+        };
+        let (mut ino, mut nlink) = (0, 1);
+        if opts.link_counts
+            && !cloud
+            && let Some(i) = win::open_info(&entry.path(), false)
+        {
+            ino = (u64::from(i.nFileIndexHigh) << 32) | u64::from(i.nFileIndexLow);
+            nlink = i.nNumberOfLinks.max(1);
+        }
+        Some(RawEntry { name, raw_name, kind: Kind::File, size, logical, dev: 0, ino, nlink, cloud })
     }
 
-    #[cfg(unix)]
-    fn file_facts(md: &std::fs::Metadata) -> (u64, u64, u64, u32) {
-        use std::os::unix::fs::MetadataExt;
-        (md.blocks() * 512, md.dev(), md.ino(), md.nlink() as u32)
+    #[cfg(not(any(unix, windows)))]
+    fn dir_entry(_: &std::fs::DirEntry, name: String, raw_name: OsString) -> Option<RawEntry> {
+        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev: 0, ino: 0, nlink: 1, cloud: false })
     }
 
-    /// Windows: allocated size is not in the directory listing; round the
-    /// logical size up to the usual 4 KiB cluster.
-    #[cfg(not(unix))]
-    fn file_facts(md: &std::fs::Metadata) -> (u64, u64, u64, u32) {
-        let len = md.len();
-        (len.div_ceil(4096) * 4096, 0, 0, 1)
+    #[cfg(not(any(unix, windows)))]
+    fn file_entry(entry: &std::fs::DirEntry, name: String, raw_name: OsString, _: &ListOptions) -> Option<RawEntry> {
+        let len = entry.metadata().ok()?.len();
+        Some(RawEntry { name, raw_name, kind: Kind::File, size: len, logical: len, dev: 0, ino: 0, nlink: 1, cloud: false })
     }
 }
 
@@ -305,5 +418,18 @@ mod tests {
         assert_eq!(pa.size, a.size);
         assert_eq!(a.logical, 10_000);
         assert_eq!(pa.logical, 10_000);
+        assert_eq!(a.raw_name, "a.bin");
+        // Folders carry their device and inode on Unix, so the walk can stop
+        // at mount points and skip a folder reached twice.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let md = std::fs::symlink_metadata(dir.path().join("sub")).unwrap();
+            for list in [&v, &p] {
+                let sub = list.iter().find(|e| e.name == "sub").unwrap();
+                assert_eq!((sub.dev, sub.ino), (md.dev(), md.ino()));
+            }
+            assert!(p.iter().all(|e| e.name != "link"), "symlinks are left out");
+        }
     }
 }

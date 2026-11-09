@@ -1,0 +1,24 @@
+DiskDiff for Linux (x86_64)
+
+Install for your user (no root needed):
+
+    ./install.sh
+
+This copies diskdiff and diskdiff-mcp to ~/.local/bin and adds DiskDiff to
+your application menu. Remove it again with ./install.sh --uninstall.
+
+Or run it straight from this folder: ./diskdiff
+
+Requirements: a desktop with Wayland or X11 and a GPU driver with Vulkan
+support (Mesa is fine), glibc 2.35 or newer (Ubuntu 22.04, Debian 12,
+Fedora 36 and later).
+
+Scans and settings are kept in ~/.local/share/diskdiff.
+
+Scanning "/" walks the root filesystem: on btrfs and ZFS that includes the
+other subvolumes/datasets of the same filesystem (such as /home on Fedora),
+but never other disks, network shares, snapshots, tmpfs or pseudo
+filesystems. Folders you can't read (other users' homes, root-only system
+folders) are shown as unreadable; run "sudo -E diskdiff" if you need them.
+
+diskdiff-mcp is DiskDiff's server for AI agents (MCP). See the README.

@@ -7,15 +7,16 @@
 //! in memory, so a full-disk scan needs a few megabytes rather than a copy of
 //! the whole tree.
 
-use crate::listing::{Kind, RawEntry, list_dir};
+use crate::listing::{Kind, ListOptions, RawEntry, list_dir_with};
 use crate::node::{DirChild, FLAG_CLOUD, FLAG_PACKAGE, FLAG_UNREADABLE, FileChild, Node, Summary};
 use crate::platform;
 use crate::store::{LargeFile, NewScan, Store};
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use rayon::prelude::*;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cmp::Reverse;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -97,7 +98,9 @@ pub struct ScanOutcome {
 struct Ctx<'a> {
     root_dev: u64,
     allowed_devs: Vec<u64>,
-    skip: &'a [PathBuf],
+    /// Names not to look at, by the folder they're in (from the plan's
+    /// absolute skip paths), so a skipped mount point is never even stat'ed.
+    skip: HashMap<PathBuf, Vec<OsString>>,
     progress: &'a Progress,
     tx: crossbeam_channel::Sender<Vec<crate::node::Piece>>,
     /// Directories already walked, by (device, inode), sharded to keep lock
@@ -112,7 +115,7 @@ struct Ctx<'a> {
 pub fn scan(store: &Store, root: &Path, temporary: bool, progress: &Progress) -> Result<ScanOutcome> {
     let t0 = std::time::Instant::now();
     let started_at = now();
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    let root = platform::canonical_root(root);
     platform::never_fetch_cloud_files();
     let plan = platform::plan(&root);
     let disk = platform::disk_space(&root).unwrap_or_default();
@@ -132,16 +135,29 @@ pub fn scan(store: &Store, root: &Path, temporary: bool, progress: &Progress) ->
         res.map(|_| writer)
     })?;
 
+    let mut skip: HashMap<PathBuf, Vec<OsString>> = HashMap::new();
+    for s in &plan.skip {
+        if let (Some(parent), Some(name)) = (s.parent(), s.file_name()) {
+            skip.entry(parent.to_owned()).or_default().push(name.to_owned());
+        }
+    }
     let ctx = Ctx {
         root_dev: platform::dev_of(&root),
         allowed_devs: plan.extra_devs.clone(),
-        skip: &plan.skip,
+        skip,
         progress,
         tx,
         seen_dirs: (0..64).map(|_| Mutex::new(HashSet::new())).collect(),
         largest: Mutex::new(BinaryHeap::new()),
         largest_floor: AtomicU64::new(0),
     };
+    // The root counts as walked, so a bind mount or btrfs mount of the same
+    // folder further down isn't walked (and counted) a second time.
+    #[cfg(unix)]
+    if let Ok(md) = std::fs::metadata(&root) {
+        use std::os::unix::fs::MetadataExt;
+        ctx.seen_dirs[(md.ino() % 64) as usize].lock().insert((md.dev(), md.ino()));
+    }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(std::thread::available_parallelism().map_or(8, |n| n.get()).clamp(4, 12) + 4)
         .stack_size(8 << 20)
@@ -158,7 +174,7 @@ pub fn scan(store: &Store, root: &Path, temporary: bool, progress: &Progress) ->
     progress.saving.store(true, Relaxed);
     let mut largest: Vec<LargeFile> =
         largest.into_inner().into_iter().map(|Reverse((size, path))| LargeFile { path, size }).collect();
-    largest.sort_by(|a, b| b.size.cmp(&a.size));
+    largest.sort_by_key(|f| Reverse(f.size));
     let (nodes_added, bytes_added) = (writer.inserted, writer.added);
     let scan_id = writer.finish(NewScan {
         root: root.to_string_lossy().into_owned(),
@@ -182,7 +198,13 @@ fn scan_dir<'a>(ctx: &Ctx<'a>, path: &Path, rel: String, live: &[&'a LiveDir], d
     if ctx.progress.cancelled() {
         return finish(ctx, node);
     }
-    let entries = match list_dir(path) {
+    let opts = ListOptions {
+        skip: ctx.skip.get(path).map_or(&[], Vec::as_slice),
+        link_counts: platform::wants_link_counts(path),
+    };
+    // A folder that can't be listed (permissions, I/O errors) is kept and
+    // marked unreadable; the scan goes on.
+    let entries = match list_dir_with(path, &opts) {
         Ok(e) => e,
         Err(_) => {
             ctx.progress.unreadable.fetch_add(1, Relaxed);
@@ -228,10 +250,10 @@ fn scan_dir<'a>(ctx: &Ctx<'a>, path: &Path, rel: String, live: &[&'a LiveDir], d
             if e.dev != 0 && e.dev != ctx.root_dev && !ctx.allowed_devs.contains(&e.dev) {
                 return None; // another volume mounted here
             }
-            let child = path.join(&e.name);
-            if ctx.skip.iter().any(|s| s == &child) {
-                return None;
-            }
+            // The on-disk name, so a non-Unicode folder name still opens.
+            let child = path.join(&e.raw_name);
+            // Same (device, inode) as a folder already walked: a bind mount,
+            // or a loop through an odd mount.
             if e.ino != 0 && !ctx.seen_dirs[(e.ino % 64) as usize].lock().insert((e.dev, e.ino)) {
                 return None;
             }

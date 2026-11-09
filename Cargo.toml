@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["engine", "app"]
+members = ["engine", "ipc", "app", "mcp"]
 
 [workspace.package]
 version = "0.3.0"

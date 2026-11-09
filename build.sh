@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Builds DiskDiff.app into target/DiskDiff.app.
+# Builds DiskDiff.app into target/DiskDiff.app, with the agent server
+# (diskdiff-mcp) inside it at Contents/MacOS/diskdiff-mcp.
 #
 #   ./build.sh            release build
 #   ./build.sh --debug    debug build (faster to compile, slower to run)
@@ -9,6 +10,9 @@
 #   ./build.sh --dmg      also package the app as target/DiskDiff_<version>_<arch>.dmg
 #
 # Flags combine, e.g. `./build.sh --install --open` or `./build.sh --universal --dmg`.
+# Elsewhere (Linux with zsh installed) it only builds the two binaries,
+# diskdiff and diskdiff-mcp, into target/<profile>/; on Windows run
+# `cargo build --release -p diskdiff -p diskdiff-mcp`. CI packages both.
 #
 # A real bundle matters on macOS: Full Disk Access is granted per app, and a
 # bare binary launched from a terminal borrows the terminal's permissions.
@@ -27,18 +31,19 @@ for arg in "$@"; do
     --install) install=true ;;
     --universal) universal=true ;;
     --dmg) dmg=true ;;
-    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (see --help)" >&2; exit 1 ;;
   esac
 done
 
-cargo_flags=(-p diskdiff)
+bins=(diskdiff diskdiff-mcp)
+cargo_flags=(-p diskdiff -p diskdiff-mcp)
 [[ $profile == release ]] && cargo_flags+=(--release)
 
 if [[ $(uname) != Darwin ]]; then
-  # No bundle outside macOS; the binary is the app.
+  # No bundle outside macOS; the binaries are the app.
   cargo build $cargo_flags
-  echo "built target/$profile/diskdiff"
+  echo "built target/$profile/diskdiff and target/$profile/diskdiff-mcp"
   exit 0
 fi
 
@@ -51,20 +56,25 @@ if $universal; then
     fi
   done
   for t in $targets; do cargo build $cargo_flags --target $t; done
-  bin=target/universal/$profile/diskdiff
-  mkdir -p "${bin:h}"
-  lipo -create -output "$bin" target/${^targets}/$profile/diskdiff
+  out=target/universal/$profile
+  mkdir -p "$out"
+  for b in $bins; do
+    lipo -create -output "$out/$b" target/${^targets}/$profile/$b
+  done
   arch=universal
 else
   cargo build $cargo_flags
-  bin=target/$profile/diskdiff
+  out=target/$profile
   arch=$(uname -m)
 fi
 
 APP=target/DiskDiff.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$bin" "$APP/Contents/MacOS/DiskDiff"
+cp "$out/diskdiff" "$APP/Contents/MacOS/DiskDiff"
+# Next to the app's own binary, so agents can be pointed at one stable path
+# inside the installed app.
+cp "$out/diskdiff-mcp" "$APP/Contents/MacOS/diskdiff-mcp"
 cp app/icon/DiskDiff.icns "$APP/Contents/Resources/DiskDiff.icns"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$APP/Contents/Info.plist" <<PLIST

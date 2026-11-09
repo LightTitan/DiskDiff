@@ -1365,6 +1365,8 @@ dependencies = [
  "anyhow",
  "dirs 6.0.0",
  "diskdiff-engine",
+ "diskdiff-ipc",
+ "embed-resource",
  "futures",
  "gpui-kit",
  "gpui-pre-platform",
@@ -1388,8 +1390,28 @@ dependencies = [
  "rayon",
  "rusqlite",
  "tempfile",
+ "windows-sys 0.61.2",
  "xxhash-rust",
  "zstd",
+]
+
+[[package]]
+name = "diskdiff-ipc"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "diskdiff-mcp"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "diskdiff-engine",
+ "diskdiff-ipc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

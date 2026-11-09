@@ -38,9 +38,34 @@ impl CloudSize {
 }
 
 /// Folders where cloud providers keep their files.
+#[cfg(target_os = "macos")]
 pub fn cloud_roots() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Vec::new() };
     vec![home.join("Library/CloudStorage"), home.join("Library/Mobile Documents")]
+}
+
+/// Folders where cloud providers keep their files: OneDrive (personal and
+/// work accounts set these variables) and iCloud for Windows. Google Drive
+/// mounts as its own drive letter, which a scan of `C:\` never enters.
+#[cfg(windows)]
+pub fn cloud_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .collect();
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        roots.push(PathBuf::from(profile).join("iCloudDrive"));
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Linux has no system-wide placeholder files; sync clients keep full copies.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn cloud_roots() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// Whether `path` is inside a cloud provider's folder.
@@ -59,7 +84,7 @@ pub fn measure_children(dir: &Path, cancel: &AtomicBool) -> HashMap<String, Clou
             let size = match e.kind {
                 Kind::File => CloudSize { logical: e.logical, on_disk: e.size, partial: false },
                 Kind::Dir if e.cloud => CloudSize { partial: true, ..Default::default() },
-                Kind::Dir => walk(&dir.join(&e.name), cancel),
+                Kind::Dir => walk(&dir.join(&e.raw_name), cancel),
                 Kind::Other => return None,
             };
             Some((e.name, size))
@@ -84,7 +109,7 @@ fn walk(dir: &Path, cancel: &AtomicBool) -> CloudSize {
         match e.kind {
             Kind::File => total.add(CloudSize { logical: e.logical, on_disk: e.size, partial: false }),
             Kind::Dir if e.cloud => total.partial = true,
-            Kind::Dir => dirs.push(dir.join(&e.name)),
+            Kind::Dir => dirs.push(dir.join(&e.raw_name)),
             Kind::Other => {}
         }
     }

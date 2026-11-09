@@ -47,6 +47,8 @@ pub enum Screen {
 }
 
 pub struct ScanJob {
+    /// Identifies the scan to agents asking for its status (see `control`).
+    pub id: u64,
     pub root: PathBuf,
     pub progress: Arc<Progress>,
 }
@@ -82,7 +84,11 @@ pub struct AppState {
     /// Full Disk Access as last checked; `None` until the first check.
     pub full_access: Option<bool>,
     pub access_prompt_dismissed: bool,
+    /// The running and last finished scan as agents see them; read off the
+    /// main thread by the control server.
+    pub jobs: crate::control::Jobs,
     counter: u64,
+    next_job: u64,
 }
 
 impl AppState {
@@ -106,7 +112,9 @@ impl AppState {
             show_manage: false,
             full_access: None,
             access_prompt_dismissed: false,
+            jobs: Default::default(),
             counter: 0,
+            next_job: 0,
         };
         s.reload_scans();
         // First launch with existing scans: start at the newest scan's folder.
@@ -136,8 +144,14 @@ impl AppState {
         if self.settings.favorites.is_some() {
             return;
         }
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let favorites = vec![home.join("Desktop"), home.join("Documents"), home.join("Downloads"), PathBuf::from("/Applications"), home];
+        // Finder's defaults on macOS; the user folders the platform knows about elsewhere.
+        let home = dirs::home_dir().unwrap_or_default();
+        let mut favorites: Vec<PathBuf> =
+            [dirs::desktop_dir(), dirs::document_dir(), dirs::download_dir()].into_iter().flatten().collect();
+        if cfg!(target_os = "macos") {
+            favorites.push(PathBuf::from("/Applications"));
+        }
+        favorites.push(home);
         self.settings.favorites = Some(favorites);
         self.settings.save();
     }
@@ -344,14 +358,24 @@ impl AppState {
     /// Scans `root`. A saved scan joins that location's history; a temporary
     /// one replaces the previous temporary scan and is discarded on quit.
     pub fn start_scan(&mut self, root: PathBuf, temporary: bool, cx: &mut Context<Self>) {
-        if self.job.is_some() {
+        if self.try_start_scan(root, temporary, cx).is_none() {
             self.notify_toast("A scan is already running.", None, cx);
-            return;
+        }
+    }
+
+    /// Like [`start_scan`](Self::start_scan) but quiet when a scan is already
+    /// running: returns the new scan's job id, or `None` if busy.
+    pub fn try_start_scan(&mut self, root: PathBuf, temporary: bool, cx: &mut Context<Self>) -> Option<u64> {
+        if self.job.is_some() {
+            return None;
         }
         self.banner = None;
+        self.next_job += 1;
+        let id = self.next_job;
         let progress = Arc::new(Progress::default());
         let handle = diskdiff_engine::scan::spawn_scan(self.store.clone(), root.clone(), temporary, progress.clone());
-        self.job = Some(ScanJob { root: root.clone(), progress: progress.clone() });
+        self.job = Some(ScanJob { id, root: root.clone(), progress: progress.clone() });
+        self.jobs.started(id, root.clone(), temporary, progress);
         cx.notify();
         cx.spawn(async move |this, cx| {
             while !handle.is_finished() {
@@ -364,6 +388,7 @@ impl AppState {
             let _ = this.update(cx, |this, cx| this.finish_scan(root, temporary, result, cx));
         })
         .detach();
+        Some(id)
     }
 
     fn finish_scan(
@@ -374,7 +399,18 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let cancelled = self.job.as_ref().is_some_and(|j| j.progress.cancelled());
-        self.job = None;
+        let id = self.job.take().map_or(0, |j| j.id);
+        self.jobs.finished(diskdiff_ipc::FinishedJob {
+            job: id,
+            root: root.clone(),
+            temporary,
+            scan_id: result.as_ref().ok().map(|o| o.scan_id),
+            cancelled,
+            error: match &result {
+                Err(e) if !cancelled => Some(format!("{e:#}")),
+                _ => None,
+            },
+        });
         match result {
             Ok(out) => {
                 if temporary {
@@ -488,5 +524,11 @@ pub fn location_detail(p: &Path) -> String {
 
 /// "Finder" or "File Explorer".
 pub fn file_manager() -> &'static str {
-    if cfg!(windows) { "File Explorer" } else { "Finder" }
+    if cfg!(windows) {
+        "File Explorer"
+    } else if cfg!(target_os = "macos") {
+        "Finder"
+    } else {
+        "file manager"
+    }
 }

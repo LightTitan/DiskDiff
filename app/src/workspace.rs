@@ -73,8 +73,10 @@ impl Workspace {
         pick_folder(self.state.clone(), temporary, cx);
     }
 
-    fn title_bar(&self, p: &Palette) -> impl IntoElement {
-        TitleBar::new().bg(p.elevated).border_color(p.border).child(
+    fn title_bar(&self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        // Windows and Linux have no system menu bar: draw the menus here.
+        let menu_bar = (!cfg!(target_os = "macos")).then(|| crate::menus::MenuBar::get(cx));
+        TitleBar::new().bg(p.elevated).border_color(p.border).children(menu_bar).child(
             div()
                 .flex_1()
                 .flex()
@@ -559,7 +561,7 @@ impl Render for Workspace {
             .text_size(px(13.))
             .cursor_default()
             .relative()
-            .child(self.title_bar(&p))
+            .child(self.title_bar(&p, cx))
             .children(self.access_prompt(&p, cx))
             .child(main)
             .when(show_manage, |el| el.child(self.manage.clone()))

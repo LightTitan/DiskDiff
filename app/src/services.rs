@@ -7,6 +7,7 @@
 
 use crate::state::AppState;
 use gpui_kit::*;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]

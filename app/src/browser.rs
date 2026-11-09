@@ -62,22 +62,31 @@ actions!(
     [SelectPrev, SelectNext, OpenSelected, GoBack, GoParent, SelectFirst, SelectLast, Reveal, CopyPath, OpenItem, AddToSidebar]
 );
 
+/// A shortcut as the platform writes it in tooltips.
+fn keys(mac: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") { mac } else { other }
+}
+
+/// "secondary" is Cmd on macOS and Ctrl on Windows and Linux (plain "cmd"
+/// would mean the Windows/Super key there).
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("Browser");
+    // Ctrl-Cmd-T on macOS; Ctrl twice isn't a chord, so Ctrl-Shift-T elsewhere.
+    let add_to_sidebar = if cfg!(target_os = "macos") { "ctrl-cmd-t" } else { "ctrl-shift-t" };
     cx.bind_keys([
         KeyBinding::new("up", SelectPrev, ctx),
         KeyBinding::new("down", SelectNext, ctx),
         KeyBinding::new("right", OpenSelected, ctx),
         KeyBinding::new("left", GoBack, ctx),
-        KeyBinding::new("cmd-up", GoParent, ctx),
+        KeyBinding::new("secondary-up", GoParent, ctx),
         KeyBinding::new("alt-up", SelectFirst, ctx),
         KeyBinding::new("alt-down", SelectLast, ctx),
         KeyBinding::new("home", SelectFirst, ctx),
         KeyBinding::new("end", SelectLast, ctx),
-        KeyBinding::new("cmd-r", Reveal, ctx),
-        KeyBinding::new("cmd-alt-c", CopyPath, ctx),
-        KeyBinding::new("cmd-down", OpenItem, ctx),
-        KeyBinding::new("ctrl-cmd-t", AddToSidebar, ctx),
+        KeyBinding::new("secondary-r", Reveal, ctx),
+        KeyBinding::new("secondary-alt-c", CopyPath, ctx),
+        KeyBinding::new("secondary-down", OpenItem, ctx),
+        KeyBinding::new(add_to_sidebar, AddToSidebar, ctx),
     ]);
 }
 
@@ -1349,21 +1358,21 @@ impl Browser {
             .child(icon_button_disabled(
                 "favorite",
                 if starred { IconName::StarOff } else { IconName::Star },
-                if starred { "Remove from Sidebar (⌃⌘T)" } else { "Add to Sidebar (⌃⌘T)" },
+                format!("{} ({})", if starred { "Remove from Sidebar" } else { "Add to Sidebar" }, keys("⌃⌘T", "Ctrl+Shift+T")),
                 folder.is_none(),
                 move |_, cx| t4.update(cx, |this, cx| this.toggle_favorite(cx)),
             ))
             .child(icon_button_disabled(
                 "reveal",
                 IconName::FolderOpen,
-                format!("Show in {} (⌘R)", file_manager()),
+                format!("Show in {} ({})", file_manager(), keys("⌘R", "Ctrl+R")),
                 !has_path,
                 move |_, cx| t1.update(cx, |this, cx| this.reveal_in_finder(cx)),
             ))
             .child(icon_button_disabled(
                 "copy",
                 if copied { IconName::Check } else { IconName::Copy },
-                if copied { "Copied" } else { "Copy path (⌥⌘C)" },
+                if copied { "Copied".to_string() } else { format!("Copy path ({})", keys("⌥⌘C", "Ctrl+Alt+C")) },
                 !has_path,
                 move |_, cx| t2.update(cx, |this, cx| this.copy_path(cx)),
             ))

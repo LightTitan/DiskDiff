@@ -74,19 +74,27 @@ pub struct Store {
 }
 
 impl Store {
+    /// Opens the store as the app does: temporary scans left over from an
+    /// earlier session are deleted, since they only live for one session.
     pub fn open(path: &Path) -> Result<Store> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let conn = open_conn(path)?;
-        migrate(&conn)?;
-        let store = Store { path: path.to_owned(), conn: Mutex::new(conn), cache: Mutex::new(NodeCache::new(4096)) };
-        // Temporary scans only live for one session of the app.
+        let store = Store::open_shared(path)?;
         let leftovers = store.temporary_ids()?;
         if !leftovers.is_empty() {
             store.delete_scans(&leftovers)?;
         }
         Ok(store)
+    }
+
+    /// Opens the store alongside another process that may already have it
+    /// open (the app, while an agent's server reads it). Unlike [`Store::open`]
+    /// this leaves temporary scans alone: one may be on screen in the app.
+    pub fn open_shared(path: &Path) -> Result<Store> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let conn = open_conn(path)?;
+        migrate(&conn)?;
+        Ok(Store { path: path.to_owned(), conn: Mutex::new(conn), cache: Mutex::new(NodeCache::new(4096)) })
     }
 
     pub fn temporary_ids(&self) -> Result<Vec<i64>> {

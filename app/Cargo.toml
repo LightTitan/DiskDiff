@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 diskdiff-engine = { path = "../engine" }
+diskdiff-ipc = { path = "../ipc" }
 gpui-kit = "0.8.0"
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["test-support"] }
 image = { version = "0.25.1", default-features = false, features = ["png"] }
@@ -21,3 +22,8 @@ futures = "0.3"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
+
+# Embeds the icon into diskdiff.exe (see build.rs). Matched against the
+# machine doing the build, like build.rs's own cfg.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"

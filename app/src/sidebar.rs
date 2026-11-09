@@ -120,7 +120,8 @@ impl Sidebar {
 
     fn entries(&self, cx: &App) -> (Vec<Entry>, Vec<Entry>) {
         let s = self.state.read(cx);
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        // dirs: HOME on macOS/Linux, the user profile on Windows (no HOME there).
+        let home = dirs::home_dir().unwrap_or_default();
         let cur = s.current_scan();
         let cmp = if s.comparing() { s.compare_scan() } else { None };
         let size_of = |p: &Path| {

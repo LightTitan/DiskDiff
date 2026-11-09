@@ -1,0 +1,52 @@
+name: CI
+
+# Builds and tests the whole workspace on macOS, Windows and Linux.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-15 is pinned: GPUI compiles its Metal shaders with
+        # `xcrun metal`, which newer Xcode versions no longer install by
+        # default. ubuntu-22.04 matches the release build (glibc 2.35).
+        os: [macos-15, windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GPUI's build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libfontconfig-dev libfreetype-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
+            libvulkan-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+
+      - run: cargo build --workspace --locked
+
+      # The app's tests are plain unit tests; none opens a window.
+      - run: cargo test --workspace --locked
+
+      # Reports warnings without failing; only lints the crates deny fail.
+      - run: cargo clippy --workspace --all-targets --locked

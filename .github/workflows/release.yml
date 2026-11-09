@@ -1,8 +1,13 @@
 name: Release
 
-# Builds DiskDiff for macOS as one universal app (Apple silicon and Intel) and
-# attaches the DMG to a draft GitHub release. Runs when a version tag (v*) is
-# pushed, or manually.
+# Builds DiskDiff for macOS (one universal app for Apple silicon and Intel),
+# Windows (x64 zip) and Linux (x86_64 tarball), and attaches all three to one
+# draft GitHub release. Runs when a version tag (v*) is pushed, or manually.
+#
+# The build jobs only upload workflow artifacts; a single last job creates
+# the draft and attaches everything, so parallel jobs never race to create
+# the release (draft releases have no tag yet, so separate uploads could
+# each create their own draft).
 on:
   push:
     tags: ["v*"]
@@ -11,11 +16,14 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
-    # Pinned: GPUI compiles its Metal shaders with `xcrun metal`, which newer
-    # Xcode versions no longer install by default.
-    runs-on: macos-15
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,20 +37,119 @@ jobs:
             exit 1
           fi
 
+  macos:
+    needs: version
+    # Pinned: GPUI compiles its Metal shaders with `xcrun metal`, which newer
+    # Xcode versions no longer install by default.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: swatinem/rust-cache@v2
 
+      # Builds DiskDiff.app with diskdiff-mcp inside, and the DMG.
       - run: ./build.sh --universal --dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/DiskDiff_${{ needs.version.outputs.version }}_universal.dmg
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      # .cargo/config.toml links the C runtime statically; build.rs embeds the icon.
+      - run: cargo build --release --locked -p diskdiff -p diskdiff-mcp
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "DiskDiff_${{ needs.version.outputs.version }}_windows_x64"
+          $stage = "target/stage/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/release/diskdiff.exe, target/release/diskdiff-mcp.exe, LICENSE -Destination $stage
+          Copy-Item packaging/windows/README.txt -Destination $stage
+          Compress-Archive -Path $stage -DestinationPath "target/$name.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/DiskDiff_${{ needs.version.outputs.version }}_windows_x64.zip
+          if-no-files-found: error
+
+  linux:
+    needs: version
+    # The oldest supported runner, so the binaries need only glibc 2.35.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GPUI's build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libfontconfig-dev libfreetype-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
+            libvulkan-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - run: cargo build --release --locked -p diskdiff -p diskdiff-mcp
+
+      - name: Package
+        run: |
+          name="DiskDiff_${{ needs.version.outputs.version }}_linux_x86_64"
+          stage="target/stage/$name"
+          mkdir -p "$stage"
+          install -m 755 target/release/diskdiff target/release/diskdiff-mcp "$stage/"
+          strip "$stage/diskdiff" "$stage/diskdiff-mcp"
+          install -m 755 packaging/linux/install.sh "$stage/"
+          install -m 644 packaging/linux/diskdiff.desktop packaging/linux/diskdiff.png \
+            packaging/linux/INSTALL.txt LICENSE "$stage/"
+          tar -czf "target/$name.tar.gz" -C target/stage "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: target/DiskDiff_${{ needs.version.outputs.version }}_linux_x86_64.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [version, macos, windows, linux]
+    # The Windows and Linux builds are new: a failure there still drafts the
+    # release with what did build, as long as the macOS DMG is there. The
+    # failed job shows red in the run, so a missing file doesn't go unnoticed.
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.macos.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
+          tag_name: v${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: DiskDiff v${{ steps.version.outputs.version }}
+          name: DiskDiff v${{ needs.version.outputs.version }}
           body: See the assets below to download DiskDiff.
           draft: true
-          files: target/DiskDiff_${{ steps.version.outputs.version }}_universal.dmg
-          fail_on_unmatched_files: true
+          files: |
+            dist/DiskDiff_${{ needs.version.outputs.version }}_universal.dmg
+            dist/DiskDiff_${{ needs.version.outputs.version }}_windows_x64.zip
+            dist/DiskDiff_${{ needs.version.outputs.version }}_linux_x86_64.tar.gz
+          fail_on_unmatched_files: false

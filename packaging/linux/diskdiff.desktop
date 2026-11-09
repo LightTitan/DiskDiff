@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DiskDiff
+GenericName=Disk Usage Analyzer
+Comment=See what takes up your disk and how folder sizes change between scans
+Exec=diskdiff
+Icon=diskdiff
+Terminal=false
+Categories=Utility;System;Filesystem;
+Keywords=disk;usage;space;storage;analyzer;
+StartupWMClass=diskdiff

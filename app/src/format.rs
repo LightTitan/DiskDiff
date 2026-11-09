@@ -76,10 +76,55 @@ fn local(unix: i64) -> (i32, u32, u32, u32, u32) {
         unsafe { localtime_r(&t, &mut tm) };
         (tm.tm_year + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_local(unix).unwrap_or_else(|| civil(unix))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         civil(unix)
     }
+}
+
+/// Windows has no `localtime_r`; convert the UTC civil time with the
+/// current time-zone rules (daylight saving included).
+#[cfg(windows)]
+fn windows_local(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct SystemTime {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        millis: u16,
+    }
+    unsafe extern "system" {
+        fn SystemTimeToTzSpecificLocalTime(
+            tz: *const std::ffi::c_void,
+            utc: *const SystemTime,
+            local: *mut SystemTime,
+        ) -> i32;
+    }
+    let (y, m, d, h, min) = civil(unix);
+    let utc = SystemTime {
+        year: u16::try_from(y).ok()?,
+        month: m as u16,
+        day: d as u16,
+        hour: h as u16,
+        minute: min as u16,
+        ..Default::default()
+    };
+    let mut local = SystemTime::default();
+    // SAFETY: both pointers are valid for the call; a null zone means the
+    // currently active one.
+    if unsafe { SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) } == 0 {
+        return None;
+    }
+    Some((local.year.into(), local.month.into(), local.day.into(), local.hour.into(), local.minute.into()))
 }
 
 #[cfg(unix)]
