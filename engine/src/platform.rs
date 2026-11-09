@@ -60,28 +60,64 @@ pub fn dev_of(_: &Path) -> u64 {
     0
 }
 
-/// The canonical absolute form of a scan root. On Windows,
-/// `canonicalize` returns verbatim paths (`\\?\C:\…`); the plain form
-/// (`C:\…`) is what users type and what saved locations hold, so it's used
-/// instead. std adds the `\\?\` prefix again by itself whenever a path is
-/// too long for the legacy API, so long paths keep working.
+/// The canonical absolute form of a scan root, the one form every path is
+/// compared in. On Windows, `canonicalize` returns verbatim paths
+/// (`\\?\C:\…`); the plain form (`C:\…`) is what users type and what saved
+/// locations hold. `dunce` drops the prefix only where that's safe: not for
+/// reserved names (`aux`, `con`), names ending in a dot or space, or paths
+/// over 260 characters, which need it. A network share (`\\?\UNC\…`, left
+/// alone by `dunce`) becomes `\\server\share\…`.
 pub fn canonical_root(root: &Path) -> PathBuf {
-    let c = root.canonicalize().unwrap_or_else(|_| root.to_owned());
-    strip_verbatim(c)
+    let c = dunce::canonicalize(root).unwrap_or_else(|_| root.to_owned());
+    plain_unc(c)
 }
 
-fn strip_verbatim(p: PathBuf) -> PathBuf {
-    let Some(s) = p.to_str() else { return p };
-    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
+fn plain_unc(p: PathBuf) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\UNC\")) {
+        Some(rest) => PathBuf::from(format!(r"\\{rest}")),
+        None => p,
     }
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        let b = rest.as_bytes();
-        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-            return PathBuf::from(rest);
-        }
+}
+
+/// Facts about the volume a scan walks, read once per scan.
+#[derive(Clone, Copy, Debug)]
+pub struct Volume {
+    /// Allocation unit: what a file's size on disk is a multiple of.
+    pub cluster: u64,
+    /// A network share or mapped network drive.
+    pub remote: bool,
+}
+
+/// Windows: the volume's cluster size (4 KiB on most NTFS volumes, 32 KiB
+/// or more on exFAT USB drives and SD cards) and whether it's on the network.
+#[cfg(windows)]
+pub fn volume(root: &Path) -> Volume {
+    use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceW, GetDriveTypeW, GetVolumePathNameW};
+    const DRIVE_REMOTE: u32 = 4;
+    let w = win::wide(root);
+    let mut vol = vec![0u16; 1024];
+    // SAFETY: `w` is NUL-terminated; `vol` has room for the stated length.
+    let ok = unsafe { GetVolumePathNameW(w.as_ptr(), vol.as_mut_ptr(), vol.len() as u32) } != 0;
+    let unc = root.to_str().is_some_and(|s| (s.starts_with(r"\\") && !s.starts_with(r"\\?\")) || s.starts_with(r"\\?\UNC\"));
+    if !ok {
+        return Volume { cluster: 4096, remote: unc };
     }
-    p
+    let (mut spc, mut bps, mut free, mut total) = (0u32, 0u32, 0u32, 0u32);
+    // SAFETY: `vol` is NUL-terminated (filled by GetVolumePathNameW).
+    let cluster = if unsafe { GetDiskFreeSpaceW(vol.as_ptr(), &mut spc, &mut bps, &mut free, &mut total) } != 0 {
+        (u64::from(spc) * u64::from(bps)).max(512)
+    } else {
+        4096
+    };
+    // SAFETY: as above.
+    let remote = unc || unsafe { GetDriveTypeW(vol.as_ptr()) } == DRIVE_REMOTE;
+    Volume { cluster, remote }
+}
+
+/// Elsewhere sizes on disk come straight from the file system.
+#[cfg(not(windows))]
+pub fn volume(_root: &Path) -> Volume {
+    Volume { cluster: 4096, remote: false }
 }
 
 /// Whether the walk should read exact hard-link counts for the files in
@@ -249,6 +285,11 @@ pub fn plan(root: &Path) -> Plan {
     }
     // Anything not on another disk may reach the Data volume through a
     // firmlink (scanning /usr reaches /usr/local, / reaches everything).
+    // Within an APFS volume group the system and Data volumes report the
+    // same device id (the real one needs FSOPT_RETURN_REALDEV), so this is
+    // normally a no-op; it stays as a guard in case a macOS version reports
+    // them apart, which would otherwise cut the Data volume out of a scan.
+    // Mount points themselves are recognised by the lister (see listing.rs).
     p.extra_devs.push(dev_of(data));
     let skip: &[&str] = &[
         // The Data volume's own mount point: its contents are already
@@ -469,6 +510,11 @@ fn same_filesystem(a: &Mount, b: &Mount) -> bool {
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn is_snapshot(m: &Mount) -> bool {
+    // A ZFS snapshot mounted by hand (`mount -t zfs pool/data@monday /mnt`)
+    // shares its data with the live dataset.
+    if m.fstype == "zfs" && m.source.contains('@') {
+        return true;
+    }
     let snap = |p: &Path| {
         p.components().any(|c| {
             let c = c.as_os_str().to_string_lossy();
@@ -490,8 +536,13 @@ pub fn never_fetch_cloud_files() {
     const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: i32 = 3;
     const IOPOL_SCOPE_PROCESS: i32 = 0;
     const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: i32 = 1;
-    unsafe {
-        setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, IOPOL_MATERIALIZE_DATALESS_FILES_OFF);
+    let rc = unsafe {
+        setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+    };
+    if rc != 0 {
+        // Dataless folders are still never entered (the walk checks the flag),
+        // but reading a dataless file could now download it.
+        eprintln!("diskdiff: could not turn off downloading of cloud files: {}", std::io::Error::last_os_error());
     }
 }
 
@@ -708,6 +759,27 @@ mod tests {
     }
 
     #[test]
+    fn a_zfs_snapshot_mounted_by_hand_is_skipped() {
+        let info = [
+            line(1, "/", "/", "zfs", "rpool/ROOT/ubuntu"),
+            line(2, "/", "/mnt/monday", "zfs", "rpool/ROOT/ubuntu@monday"),
+        ]
+        .concat();
+        let dev = |p: &Path| if p == Path::new("/mnt/monday") { 42 } else { 40 };
+        let p = linux_plan(Path::new("/"), &parse_mountinfo(&info), dev);
+        assert!(p.extra_devs.is_empty(), "{:?}", p.extra_devs);
+        assert!(p.skip.contains(&PathBuf::from("/mnt/monday")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_volume_has_a_cluster_size() {
+        let v = volume(&std::env::temp_dir());
+        assert!(v.cluster >= 512 && v.cluster.is_power_of_two(), "{v:?}");
+        assert!(!v.remote);
+    }
+
+    #[test]
     fn a_later_mount_hides_an_earlier_one_on_the_same_point() {
         let info = [
             line(1, "/root", "/", "btrfs", "/dev/vda3"),
@@ -729,12 +801,22 @@ mod tests {
     }
 
     #[test]
-    fn verbatim_prefixes_are_removed() {
-        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\C:\Users")), PathBuf::from(r"C:\Users"));
-        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\UNC\server\share")), PathBuf::from(r"\\server\share"));
-        // Device paths have no plain form; left alone.
-        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\Volume{1}\")), PathBuf::from(r"\\?\Volume{1}\"));
-        assert_eq!(strip_verbatim(PathBuf::from("/home/user")), PathBuf::from("/home/user"));
+    fn network_shares_lose_the_verbatim_prefix() {
+        assert_eq!(plain_unc(PathBuf::from(r"\\?\UNC\server\share")), PathBuf::from(r"\\server\share"));
+        // Drive paths are dunce's job; device paths have no plain form.
+        assert_eq!(plain_unc(PathBuf::from(r"\\?\Volume{1}\")), PathBuf::from(r"\\?\Volume{1}\"));
+        assert_eq!(plain_unc(PathBuf::from("/home/user")), PathBuf::from("/home/user"));
+    }
+
+    #[test]
+    fn canonical_root_resolves_like_canonicalize() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = canonical_root(dir.path());
+        assert!(c.is_absolute() && c.is_dir());
+        assert!(!c.to_string_lossy().starts_with(r"\\?\"), "{}", c.display());
+        // A path that doesn't exist is kept as given.
+        let missing = dir.path().join("gone");
+        assert_eq!(canonical_root(&missing), missing);
     }
 
     #[cfg(target_os = "macos")]

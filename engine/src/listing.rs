@@ -51,6 +51,10 @@ pub struct RawEntry {
     /// recall-on-open): its contents are not on this disk, and opening it
     /// would make the OS fetch them from the network.
     pub cloud: bool,
+    /// A folder whose details couldn't be read (Unix: `lstat` failed, e.g. a
+    /// network mount that died after the scan started). The walk marks it
+    /// unreadable without trying to enter it.
+    pub unreadable: bool,
 }
 
 /// Extra choices for [`list_dir_with`].
@@ -64,6 +68,13 @@ pub struct ListOptions<'a> {
     /// open (Windows; see [`crate::platform::wants_link_counts`]). On Unix
     /// the count always comes with the entry's metadata.
     pub link_counts: bool,
+    /// Windows: the volume's cluster size, what sizes on disk round up to
+    /// (0 means the NTFS default, 4 KiB). Unix and macOS report allocated
+    /// sizes directly.
+    pub cluster: u64,
+    /// Windows: the folder is on a network share. Asking a network
+    /// redirector for compressed sizes can block indefinitely, so it isn't.
+    pub remote: bool,
 }
 
 /// Lists `path` with default options.
@@ -112,6 +123,11 @@ mod macos {
     const ATTR_CMN_FILEID: u32 = 0x0200_0000;
     const ATTR_CMN_ERROR: u32 = 0x2000_0000;
     const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
+    const ATTR_DIR_MOUNTSTATUS: u32 = 0x0000_0004;
+    /// Something is mounted on this folder.
+    const DIR_MNTSTATUS_MNTPOINT: u32 = 0x0000_0001;
+    /// An autofs trigger: entering it mounts something (often over the network).
+    const DIR_MNTSTATUS_TRIGGER: u32 = 0x0000_0002;
     const ATTR_FILE_LINKCOUNT: u32 = 0x0000_0001;
     const ATTR_FILE_ALLOCSIZE: u32 = 0x0000_0004;
     const ATTR_FILE_DATALENGTH: u32 = 0x0000_0200;
@@ -143,7 +159,7 @@ mod macos {
                 | ATTR_CMN_FLAGS
                 | ATTR_CMN_FILEID,
             volattr: 0,
-            dirattr: 0,
+            dirattr: ATTR_DIR_MOUNTSTATUS,
             fileattr: ATTR_FILE_LINKCOUNT | ATTR_FILE_ALLOCSIZE | ATTR_FILE_DATALENGTH,
             forkattr: 0,
         };
@@ -168,8 +184,8 @@ mod macos {
                 if len == 0 || p + len > buf.len() {
                     break;
                 }
-                // getattrlistbulk reports a mount point's attributes without
-                // entering it, so skipped names cost nothing extra here.
+                // getattrlistbulk reports an entry's attributes without
+                // entering it, so skipped names and mount points cost nothing.
                 if let Some(e) = parse(entry).filter(|e| !skipped(opts, &e.raw_name)) {
                     out.push(e);
                 }
@@ -188,10 +204,18 @@ mod macos {
     }
 
     /// Fields follow the length in bit order, after the returned-attributes
-    /// set and the error code.
+    /// set and the error code: common, then directory, then file attributes.
+    ///
+    /// Mount points and autofs triggers are left out. For a mount point
+    /// getattrlistbulk reports the folder underneath it, on the parent's
+    /// device (see getattrlistbulk(2)), so the walk's device check can't tell
+    /// it's another volume; only the mount status can. Leaving them out means
+    /// another disk, a disk image or a network share mounted inside the
+    /// scanned folder is never entered, so it can't hang the walk or add to it.
     fn parse(e: &[u8]) -> Option<RawEntry> {
         let mut p = 4;
         let common = rd_u32(e, p);
+        let dir = rd_u32(e, p + 8);
         let file = rd_u32(e, p + 12);
         p += 20; // attribute_set_t: five u32
         if common & ATTR_CMN_ERROR != 0 {
@@ -232,6 +256,13 @@ mod macos {
             ino = rd_u64(e, p);
             p += 8;
         }
+        if dir & ATTR_DIR_MOUNTSTATUS != 0 {
+            let status = rd_u32(e, p);
+            p += 4;
+            if status & (DIR_MNTSTATUS_MNTPOINT | DIR_MNTSTATUS_TRIGGER) != 0 {
+                return None;
+            }
+        }
         let mut nlink = 1;
         let mut size = 0;
         if file & ATTR_FILE_LINKCOUNT != 0 {
@@ -251,7 +282,7 @@ mod macos {
             VDIR => Kind::Dir,
             _ => Kind::Other,
         };
-        Some(RawEntry { name, raw_name, kind, size, logical, dev, ino, nlink, cloud: flags & SF_DATALESS != 0 })
+        Some(RawEntry { name, raw_name, kind, size, logical, dev, ino, nlink, cloud: flags & SF_DATALESS != 0, unreadable: false })
     }
 }
 
@@ -295,8 +326,10 @@ pub mod portable {
     #[cfg(unix)]
     fn dir_entry(entry: &std::fs::DirEntry, name: String, raw_name: OsString) -> Option<RawEntry> {
         use std::os::unix::fs::MetadataExt;
-        let (dev, ino) = entry.metadata().map_or((0, 0), |m| (m.dev(), m.ino()));
-        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev, ino, nlink: 1, cloud: false })
+        // If even `lstat` fails, the folder's volume is unknown: it isn't
+        // entered (it could be a dead network mount), just marked unreadable.
+        let (dev, ino, unreadable) = entry.metadata().map_or((0, 0, true), |m| (m.dev(), m.ino(), false));
+        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev, ino, nlink: 1, cloud: false, unreadable })
     }
 
     #[cfg(unix)]
@@ -315,6 +348,7 @@ pub mod portable {
             ino: md.ino(),
             nlink: md.nlink() as u32,
             cloud: false,
+            unreadable: false,
         })
     }
 
@@ -340,7 +374,7 @@ pub mod portable {
         use std::os::windows::fs::MetadataExt;
         let attrs = entry.metadata().map_or(0, |m| m.file_attributes());
         let cloud = attrs & (attr::RECALL_ON_OPEN | attr::RECALL_ON_DATA_ACCESS) != 0;
-        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev: 0, ino: 0, nlink: 1, cloud })
+        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev: 0, ino: 0, nlink: 1, cloud, unreadable: false })
     }
 
     /// Windows: the find data has the length and attributes but not the
@@ -349,7 +383,8 @@ pub mod portable {
     /// - Compressed (NTFS, or CompactOS/WOF, which shows as a reparse point),
     ///   sparse and deduplicated files ask for their real on-disk size; only
     ///   those few files pay for the call.
-    /// - Everything else: the length rounded up to the usual 4 KiB cluster.
+    /// - Everything else: the length rounded up to the volume's cluster.
+    /// - On a network share no per-file calls at all (see [`ListOptions::remote`]).
     /// - Link counts only when asked (see [`ListOptions::link_counts`]); the
     ///   open reads attributes only and doesn't follow reparse points.
     #[cfg(windows)]
@@ -360,34 +395,43 @@ pub mod portable {
         let attrs = md.file_attributes();
         let logical = md.len();
         let cloud = attrs & attr::CLOUD != 0;
-        let rounded = |n: u64| n.div_ceil(4096) * 4096;
+        let cluster = if opts.cluster == 0 { 4096 } else { opts.cluster };
+        let rounded = |n: u64| n.div_ceil(cluster) * cluster;
         let size = if cloud {
             0
-        } else if attrs & (attr::COMPRESSED | attr::SPARSE | attr::REPARSE_POINT) != 0 {
-            win::compressed_size(&entry.path()).map_or(rounded(logical), rounded)
+        } else if !opts.remote && attrs & (attr::COMPRESSED | attr::SPARSE | attr::REPARSE_POINT) != 0 {
+            match win::compressed_size(&entry.path()) {
+                Some(n) => rounded(n),
+                // A reparse point the system can't open (a container or
+                // sandbox placeholder with no filter loaded here) holds no
+                // data on this disk; counting its length would invent space.
+                None if attrs & attr::REPARSE_POINT != 0 => 0,
+                None => rounded(logical),
+            }
         } else {
             rounded(logical)
         };
         let (mut ino, mut nlink) = (0, 1);
         if opts.link_counts
             && !cloud
+            && !opts.remote
             && let Some(i) = win::open_info(&entry.path(), false)
         {
             ino = (u64::from(i.nFileIndexHigh) << 32) | u64::from(i.nFileIndexLow);
             nlink = i.nNumberOfLinks.max(1);
         }
-        Some(RawEntry { name, raw_name, kind: Kind::File, size, logical, dev: 0, ino, nlink, cloud })
+        Some(RawEntry { name, raw_name, kind: Kind::File, size, logical, dev: 0, ino, nlink, cloud, unreadable: false })
     }
 
     #[cfg(not(any(unix, windows)))]
     fn dir_entry(_: &std::fs::DirEntry, name: String, raw_name: OsString) -> Option<RawEntry> {
-        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev: 0, ino: 0, nlink: 1, cloud: false })
+        Some(RawEntry { name, raw_name, kind: Kind::Dir, size: 0, logical: 0, dev: 0, ino: 0, nlink: 1, cloud: false, unreadable: false })
     }
 
     #[cfg(not(any(unix, windows)))]
     fn file_entry(entry: &std::fs::DirEntry, name: String, raw_name: OsString, _: &ListOptions) -> Option<RawEntry> {
         let len = entry.metadata().ok()?.len();
-        Some(RawEntry { name, raw_name, kind: Kind::File, size: len, logical: len, dev: 0, ino: 0, nlink: 1, cloud: false })
+        Some(RawEntry { name, raw_name, kind: Kind::File, size: len, logical: len, dev: 0, ino: 0, nlink: 1, cloud: false, unreadable: false })
     }
 }
 

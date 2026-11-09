@@ -101,6 +101,7 @@ struct Ctx<'a> {
     /// Names not to look at, by the folder they're in (from the plan's
     /// absolute skip paths), so a skipped mount point is never even stat'ed.
     skip: HashMap<PathBuf, Vec<OsString>>,
+    volume: platform::Volume,
     progress: &'a Progress,
     tx: crossbeam_channel::Sender<Vec<crate::node::Piece>>,
     /// Directories already walked, by (device, inode), sharded to keep lock
@@ -145,6 +146,7 @@ pub fn scan(store: &Store, root: &Path, temporary: bool, progress: &Progress) ->
         root_dev: platform::dev_of(&root),
         allowed_devs: plan.extra_devs.clone(),
         skip,
+        volume: platform::volume(&root),
         progress,
         tx,
         seen_dirs: (0..64).map(|_| Mutex::new(HashSet::new())).collect(),
@@ -201,6 +203,8 @@ fn scan_dir<'a>(ctx: &Ctx<'a>, path: &Path, rel: String, live: &[&'a LiveDir], d
     let opts = ListOptions {
         skip: ctx.skip.get(path).map_or(&[], Vec::as_slice),
         link_counts: platform::wants_link_counts(path),
+        cluster: ctx.volume.cluster,
+        remote: ctx.volume.remote,
     };
     // A folder that can't be listed (permissions, I/O errors) is kept and
     // marked unreadable; the scan goes on.
@@ -296,6 +300,9 @@ fn scan_dir<'a>(ctx: &Ctx<'a>, path: &Path, rel: String, live: &[&'a LiveDir], d
             // Its contents are not on this disk, so it takes ~0 bytes here.
             let s = if e.cloud {
                 finish(ctx, Node { flags: FLAG_CLOUD, ..Default::default() })
+            } else if e.unreadable {
+                ctx.progress.unreadable.fetch_add(1, Relaxed);
+                finish(ctx, Node { flags: FLAG_UNREADABLE, ..Default::default() })
             } else {
                 scan_dir(ctx, &child, child_rel, live, depth + 1)
             };

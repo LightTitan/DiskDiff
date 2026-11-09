@@ -127,7 +127,9 @@ fn junctions_and_directory_links_are_never_followed() {
             .success();
         assert!(ok);
     };
-    junction(&root.join("app/loop"), &root);
+    // Joined part by part: a `/` inside the path would reach `mklink` as an
+    // option ("/loop").
+    junction(&root.join("app").join("loop"), &root);
     junction(&root.join("photos"), &outside);
     assert_eq!(scan_of(&root), (alone, 1, 0));
 }
@@ -159,4 +161,66 @@ fn skipped_names_are_left_out_of_a_listing() {
         .map(|e| e.name)
         .collect();
     assert_eq!(names, ["Downloads"]);
+}
+
+/// macOS reports a mount point with the parent's device id, so only its mount
+/// status keeps a disk image (or another disk, or a network share) mounted
+/// inside the scanned folder from being walked.
+#[cfg(target_os = "macos")]
+#[test]
+fn mounted_volumes_inside_the_folder_are_never_entered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("Project");
+    write(&root.join("app/main.bin"), 40_000);
+    let (alone, files, _) = scan_of(&root);
+    assert_eq!(files, 1);
+
+    let image = tmp.path().join("Photos.dmg");
+    let mount = root.join("Photos");
+    let hdiutil = |args: &[&std::ffi::OsStr]| std::process::Command::new("hdiutil").args(args).output();
+    let created = hdiutil(&["create".as_ref(), "-size".as_ref(), "4m".as_ref(), "-fs".as_ref(), "APFS".as_ref(), "-volname".as_ref(), "Photos".as_ref(), image.as_os_str()]);
+    if !created.as_ref().is_ok_and(|o| o.status.success()) {
+        eprintln!("skipped: hdiutil can't create disk images here ({created:?})");
+        return;
+    }
+    fs::create_dir_all(&mount).unwrap();
+    let attached = hdiutil(&["attach".as_ref(), "-nobrowse".as_ref(), "-mountpoint".as_ref(), mount.as_os_str(), image.as_os_str()]);
+    if !attached.as_ref().is_ok_and(|o| o.status.success()) {
+        eprintln!("skipped: hdiutil can't attach disk images here ({attached:?})");
+        return;
+    }
+    struct Detach<'a>(&'a Path);
+    impl Drop for Detach<'_> {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("hdiutil").args(["detach", "-force"]).arg(self.0).output();
+        }
+    }
+    let _detach = Detach(&mount);
+    write(&mount.join("big.jpg"), 400_000);
+    write(&mount.join("raw/img.raw"), 400_000);
+    let (size, files, unreadable) = scan_of(&root);
+    assert_eq!((files, unreadable), (1, 0), "the image's files were counted");
+    assert!(size < alone + 100_000, "the image's bytes were counted: {size} vs {alone}");
+}
+
+/// A folder whose `lstat` fails (here: its parent can be listed but not
+/// searched) has an unknown volume: it's marked unreadable, not entered.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_folder_that_cant_be_stated_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root can stat anything");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("Project");
+    write(&root.join("app/main.bin"), 40_000);
+    let locked = root.join("locked");
+    write(&locked.join("inner/b.bin"), 40_000);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o444)).unwrap();
+    let (_, files, unreadable) = scan_of(&root);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(files, 1);
+    assert_eq!(unreadable, 1, "locked/inner should be marked unreadable");
 }
