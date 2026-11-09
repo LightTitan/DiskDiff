@@ -23,7 +23,7 @@ impl Tmp {
             .join(format!("diskdiff-mcp-{name}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
-        Tmp(p.canonicalize().unwrap())
+        Tmp(diskdiff_engine::platform::canonical_root(&p))
     }
 }
 
@@ -427,7 +427,7 @@ fn run_scan_through_the_app() {
     assert!(r["hint"].as_str().unwrap().contains("scan_status"));
     assert_eq!(
         asked.lock().unwrap()[0],
-        ipc::Request::Scan { path: root.canonicalize().unwrap(), temporary: true }
+        ipc::Request::Scan { path: diskdiff_engine::platform::canonical_root(&root), temporary: true }
     );
 
     let st = ok(&c, "scan_status", json!({}));

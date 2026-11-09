@@ -70,6 +70,8 @@ impl Runner {
 
 pub fn run(ctx: &Ctx, path: &Path, temporary: bool, wait: u64) -> Result<Value> {
     let root = path.canonicalize().map_err(|e| anyhow!("cannot scan {}: {e}", path.display()))?;
+    // The form scans store their root in (no `\\?\` on Windows).
+    let root = diskdiff_engine::platform::canonical_root(&root);
     if !root.is_dir() {
         bail!("{} is not a folder", root.display());
     }

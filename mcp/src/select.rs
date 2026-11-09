@@ -136,7 +136,8 @@ fn expand_home(raw: &str) -> PathBuf {
 }
 
 /// Spells a path the way scans store roots: canonical (symlinks such as
-/// /tmp → /private/tmp resolved, `\\?\` on Windows). A path that no longer
+/// /tmp → /private/tmp resolved), and on Windows without the `\\?\`
+/// prefix `canonicalize` adds, as the scanner does. A path that no longer
 /// exists is resolved through its nearest existing ancestor, so a deleted
 /// folder still matches its old scans.
 pub fn normalize(p: &Path) -> PathBuf {
@@ -144,6 +145,7 @@ pub fn normalize(p: &Path) -> PathBuf {
     let mut cur = p;
     loop {
         if let Ok(c) = cur.canonicalize() {
+            let c = diskdiff_engine::platform::canonical_root(&c);
             return rest.iter().rev().fold(c, |acc, n| acc.join(n));
         }
         match (cur.parent(), cur.file_name()) {

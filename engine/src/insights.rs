@@ -727,7 +727,7 @@ mod tests {
         let store = Store::open(&tmp.path().join("db.sqlite")).unwrap();
         let cur = scan_at(&store, &root);
         let f = suggestions_with(&store, std::slice::from_ref(&cur), &cur, &opts()).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = crate::platform::canonical_root(&root);
 
         let junk: Vec<_> = f.iter().filter(|x| x.kind == FindingKind::Regenerable).collect();
         assert_eq!(junk.len(), 1, "{f:#?}");
@@ -760,7 +760,7 @@ mod tests {
         let scans = vec![s1.clone(), s2, s3.clone()];
 
         let f = suggestions_with(&store, &scans, &s3, &opts()).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = crate::platform::canonical_root(&root);
         let stale: Vec<_> = f.iter().filter(|x| x.kind == FindingKind::Untouched).collect();
         assert_eq!(stale.len(), 1, "{f:#?}");
         assert_eq!(stale[0].path, root.join("Archive"));
@@ -813,7 +813,7 @@ mod tests {
         write(&root.join("live.txt"), 50_000);
         let s2 = scan_at(&store, &root);
         let f = suggestions_with(&store, &[s1, s2.clone()], &s2, &opts()).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = crate::platform::canonical_root(&root);
         let kinds: Vec<_> = f.iter().map(|x| (x.kind, x.path.strip_prefix(&root).unwrap().to_owned())).collect();
         assert!(kinds.contains(&(FindingKind::Regenerable, "OldProject/node_modules".into())), "{kinds:?}");
         assert!(f.iter().any(|x| x.kind == FindingKind::Duplicate), "{kinds:?}");
@@ -862,7 +862,7 @@ mod tests {
         }
         let s2 = scan_at(&store, &root);
         let ch = changes(&store, &s2, &s1, 300_000, 100).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = crate::platform::canonical_root(&root);
         let find = |p: &str| ch.changes.iter().find(|c| c.path == root.join(p));
         assert_eq!(find("gone").unwrap().status, Status::Removed);
         assert_eq!(find("new").unwrap().status, Status::Added);

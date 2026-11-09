@@ -32,7 +32,7 @@ fn scan_dedup_diff_and_delete() {
 
     let scans = store.scans().unwrap();
     let (a, b) = (&scans[1], &scans[0]);
-    let root = root.canonicalize().unwrap();
+    let root = diskdiff_engine::platform::canonical_root(&root);
     let l = query::list(&store, a, Some(b), &root).unwrap();
     let get = |n: &str| l.items.iter().find(|i| &*i.name == n).unwrap().clone();
     assert_eq!(get("stable").status, Status::Same);
@@ -80,7 +80,7 @@ fn big_folder_rescan_writes_little() {
     let b = scan::scan(&store, &root, false, &Progress::default()).unwrap();
     assert!(b.bytes_added * 5 < a.bytes_added, "first {} then {}", a.bytes_added, b.bytes_added);
     let scans = store.scans().unwrap();
-    let root = root.canonicalize().unwrap();
+    let root = diskdiff_engine::platform::canonical_root(&root);
     let l = query::list(&store, &scans[1], Some(&scans[0]), &root).unwrap();
     assert_eq!(l.items.len(), 6000);
     let changed: Vec<_> = l.items.iter().filter(|i| i.status == Status::Changed).collect();
@@ -109,7 +109,7 @@ fn live_tree_ends_at_the_saved_sizes() {
     let files = &live.contents.get().unwrap().files;
     assert_eq!(files.iter().map(|(n, _)| &**n).collect::<Vec<_>>(), ["notes.txt"]);
 
-    let root = root.canonicalize().unwrap();
+    let root = diskdiff_engine::platform::canonical_root(&root);
     for item in query::list(&store, scan, None, &root).unwrap().items.iter().filter(|i| i.is_dir) {
         let d = live.find(Path::new(&*item.name)).unwrap();
         assert!(d.done.load(Relaxed));
