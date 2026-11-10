@@ -152,6 +152,7 @@ fn day(unix: i64) -> String {
 /// is used from a terminal, for an agent's instructions.
 pub fn guide(command: &str) -> String {
     let c = command;
+    let powershell = powershell_note(c);
     format!(
         "\
 # DiskDiff
@@ -174,13 +175,44 @@ Suggested flow: `report` or `list_scans` first, then `what_changed` and `cleanup
 Nothing is out of reach: the history holds every file of every scan. `call` results come in pages (pass `next_offset` as `offset`), and `export` prints a whole scan or every change at once. Write an export to a file and search it with grep, sort or awk to find unusual growth the summaries don't show.
 Cleanup suggestions are candidates to check and explain, not instructions. The tool never deletes or moves files: tell the person what they could remove, where it is, how big it is and why it is safe or not, and let them decide.
 For fresh numbers use `run_scan` (temporary by default, so it doesn't join the folder's history). The DiskDiff app runs the scan if it is installed.
-Sizes are decimal (1 GB = 10^9 bytes); each comes as exact bytes plus a *_human string.
+Output is compact JSON. Paths in a result's lists are relative to that result's `path` (absolute when outside it). Sizes are bytes; totals also come as *_human strings, decimal (1 GB = 10^9 bytes).
 Run these commands directly: the tool's `mcp` command starts an MCP server for MCP clients and isn't needed here.
-"
+{powershell}"
     )
 }
 
-/// [`guide`] as a Claude Code skill (`~/.claude/skills/diskdiff/SKILL.md`).
+/// On Windows, PowerShell runs a quoted path only after `&`; Git Bash and
+/// cmd don't need it.
+fn powershell_note(command: &str) -> String {
+    if cfg!(windows) && command.starts_with('"') {
+        format!("In PowerShell, put `&` before the quoted command: `& {command} call list_scans`.\n")
+    } else {
+        String::new()
+    }
+}
+
+/// A prompt to paste into any AI agent so it sets DiskDiff up for itself:
+/// saves the skill where it loads skills, or adds the guide to its
+/// instructions when it has no skills.
+pub fn setup_prompt(command: &str) -> String {
+    let c = command;
+    format!(
+        "\
+Set up DiskDiff for yourself, so you can answer my questions about disk space. DiskDiff keeps a history of my disk scans, and its command-line tool is:
+
+{c}
+
+1. Run `{c} skill` and save the output as `diskdiff/SKILL.md` in the folder you load skills from: `~/.agents/skills/` for Codex, Cursor, Gemini CLI and GitHub Copilot, `~/.claude/skills/` for Claude Code, or your own equivalent. Create the folder if it's missing.
+2. If you don't support skills, run `{c} guide` and add the output to your global instructions instead, such as `~/.codex/AGENTS.md` or your rules file.
+3. Check it works with `{c} call list_scans`.
+{powershell}
+Only set it up. Don't delete or move any files.
+",
+        powershell = powershell_note(c),
+    )
+}
+
+/// [`guide`] as an Agent Skill (`diskdiff/SKILL.md` in `~/.claude/skills` or `~/.agents/skills`).
 pub fn skill(command: &str) -> String {
     format!(
         "---\nname: diskdiff\ndescription: \"Answer questions about disk space with DiskDiff's scan history: what takes up space, what grew since an earlier scan, and what could safely be cleaned up. Use when the person asks why their disk is full, where space went, or what to delete.\"\n---\n\n{}",
@@ -197,5 +229,28 @@ pub fn own_command() -> String {
     match std::env::current_exe() {
         Ok(exe) => format!("\"{}\"", exe.display()),
         Err(_) => "diskdiff-cli".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_prompt_names_the_command_and_both_skill_folders() {
+        let p = setup_prompt("\"/opt/app/diskdiff-cli\"");
+        assert!(p.contains("`\"/opt/app/diskdiff-cli\" skill`"), "{p}");
+        assert!(p.contains("~/.agents/skills/") && p.contains("~/.claude/skills/"), "{p}");
+        assert!(p.contains("`\"/opt/app/diskdiff-cli\" guide`"), "{p}");
+        assert!(p.contains("Don't delete or move any files."), "{p}");
+    }
+
+    #[test]
+    fn powershell_needs_an_ampersand_on_windows_only() {
+        let g = guide("\"C:\\Programs\\DiskDiff\\diskdiff-cli.exe\"");
+        assert_eq!(g.contains("In PowerShell, put `&`"), cfg!(windows), "{g}");
+        // An AppImage command isn't a bare quoted path on Windows anyway;
+        // an unquoted command never needs the note.
+        assert!(!guide("diskdiff-cli").contains("PowerShell"));
     }
 }

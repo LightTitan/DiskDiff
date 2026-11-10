@@ -68,7 +68,8 @@ actions!(
         OpenPrivacySettings,
         ShowDatabase,
         CopyMcpSetup,
-        InstallClaudeSkill,
+        InstallAgentSkill,
+        CopyAgentSetupPrompt,
         CopyForAi,
     ]
 );
@@ -181,7 +182,9 @@ pub fn init(state: Entity<AppState>, cx: &mut App) {
     let s = state.clone();
     cx.on_action(move |_: &CopyMcpSetup, cx| copy_mcp_setup(&s, cx));
     let s = state.clone();
-    cx.on_action(move |_: &InstallClaudeSkill, cx| install_claude_skill(&s, cx));
+    cx.on_action(move |_: &InstallAgentSkill, cx| install_agent_skill(&s, cx));
+    let s = state.clone();
+    cx.on_action(move |_: &CopyAgentSetupPrompt, cx| copy_agent_setup_prompt(&s, cx));
     let s = state.clone();
     cx.on_action(move |_: &CopyForAi, cx| crate::insights::copy_for_ai(s.clone(), cx));
     let s = state.clone();
@@ -333,8 +336,9 @@ fn menus(s: &AppState) -> Vec<Menu> {
         help.push(MenuItem::action("Full Disk Access Settings…", OpenPrivacySettings));
         help.push(MenuItem::separator());
     }
+    help.push(MenuItem::action("Install skill for AI agents", InstallAgentSkill));
+    help.push(MenuItem::action("Copy setup prompt for AI agents", CopyAgentSetupPrompt));
     help.push(MenuItem::action("Copy MCP setup", CopyMcpSetup));
-    help.push(MenuItem::action("Install Claude Code skill", InstallClaudeSkill));
     if !mac {
         help.push(MenuItem::separator());
         help.push(MenuItem::action("About DiskDiff", About));
@@ -375,41 +379,70 @@ fn copy_mcp_setup(state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |s, cx| s.notify_toast("MCP setup copied", Some(detail.into()), cx));
 }
 
-/// Saves a Claude Code skill that tells Claude to run `diskdiff-cli` itself
-/// when asked about disk space (`~/.claude/skills/diskdiff/SKILL.md`).
-fn install_claude_skill(state: &Entity<AppState>, cx: &mut App) {
-    let (command, found) = match std::env::var_os("APPIMAGE").map(std::path::PathBuf::from) {
+/// How an agent's shell runs `diskdiff-cli`: its path next to the app,
+/// quoted, or the AppImage it was started from plus `cli` (the AppImage's
+/// mount is temporary). And whether that file is there.
+fn cli_command() -> (String, bool) {
+    match std::env::var_os("APPIMAGE").map(std::path::PathBuf::from) {
         Some(image) => (format!("\"{}\" cli", image.display()), image.is_file()),
         None => {
             let (cli, found) = sibling_cli();
             (format!("\"{}\"", cli.display()), found)
         }
-    };
+    }
+}
+
+/// Saves a skill that tells AI agents to run `diskdiff-cli` themselves when
+/// asked about disk space: in `~/.claude/skills` for Claude Code and in
+/// `~/.agents/skills`, the shared folder of Codex, Cursor, Gemini CLI and
+/// GitHub Copilot.
+fn install_agent_skill(state: &Entity<AppState>, cx: &mut App) {
+    let (command, found) = cli_command();
     let result = match dirs::home_dir() {
-        Some(home) => write_claude_skill(&home, &command),
+        Some(home) => write_skill(&home, &command),
         None => Err(std::io::Error::other("no home folder")),
     };
     state.update(cx, |s, cx| match result {
         Ok(_) => {
             let detail = if found {
-                "Claude Code now uses DiskDiff when you ask about disk space. Saved to ~/.claude/skills/diskdiff/SKILL.md."
+                "Claude Code, Codex, Cursor, Gemini CLI and Copilot now use DiskDiff when you ask about disk space. Saved to ~/.claude/skills and ~/.agents/skills."
             } else {
-                "Saved to ~/.claude/skills/diskdiff/SKILL.md, but diskdiff-cli wasn’t found next to the app, so the path in it may need fixing."
+                "Saved to ~/.claude/skills and ~/.agents/skills, but diskdiff-cli wasn’t found next to the app, so the path in it may need fixing."
             };
-            s.notify_toast("Claude Code skill installed", Some(detail.into()), cx)
+            s.notify_toast("Skill installed", Some(detail.into()), cx)
         }
         Err(e) => s.notify_toast("Could not install the skill", Some(e.to_string().into()), cx),
     });
 }
 
-/// Writes the skill for `command` to `<home>/.claude/skills/diskdiff/SKILL.md`,
-/// replacing an earlier one (the file is DiskDiff's), and returns its path.
-fn write_claude_skill(home: &std::path::Path, command: &str) -> std::io::Result<std::path::PathBuf> {
-    let dir = home.join(".claude").join("skills").join("diskdiff");
-    std::fs::create_dir_all(&dir)?;
-    let file = dir.join("SKILL.md");
-    std::fs::write(&file, diskdiff_cli::report::skill(command))?;
-    Ok(file)
+/// Copies a prompt that asks any AI agent to set DiskDiff up for itself, for
+/// agents whose skills live elsewhere or that run on another setup.
+fn copy_agent_setup_prompt(state: &Entity<AppState>, cx: &mut App) {
+    let (command, found) = cli_command();
+    cx.write_to_clipboard(ClipboardItem::new_string(diskdiff_cli::report::setup_prompt(&command)));
+    let detail = if found {
+        "Paste it into your AI agent, and it sets DiskDiff up for itself."
+    } else {
+        "diskdiff-cli wasn’t found next to the app, so the path in it may need fixing."
+    };
+    state.update(cx, |s, cx| s.notify_toast("Setup prompt copied", Some(detail.into()), cx));
+}
+
+/// Writes the skill for `command` to `diskdiff/SKILL.md` under
+/// `<home>/.claude/skills` and `<home>/.agents/skills`, replacing earlier
+/// ones (the files are DiskDiff's), and returns their paths.
+fn write_skill(home: &std::path::Path, command: &str) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let text = diskdiff_cli::report::skill(command);
+    [".claude", ".agents"]
+        .iter()
+        .map(|agent| {
+            let dir = home.join(agent).join("skills").join("diskdiff");
+            std::fs::create_dir_all(&dir)?;
+            let file = dir.join("SKILL.md");
+            std::fs::write(&file, &text)?;
+            Ok(file)
+        })
+        .collect()
 }
 
 /// `diskdiff-cli` next to the running app, and whether it's there (it isn't
@@ -488,20 +521,26 @@ mod tests {
     }
 
     #[test]
-    fn claude_skill_lands_in_the_home_folder() {
+    fn skill_lands_in_both_skill_folders() {
         let home = std::env::temp_dir().join(format!("diskdiff-skill-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let file = write_claude_skill(&home, "\"/opt/app/diskdiff-cli\"").unwrap();
-        assert_eq!(file, home.join(".claude/skills/diskdiff/SKILL.md"));
-        let text = std::fs::read_to_string(&file).unwrap();
-        assert!(text.starts_with("---\nname: diskdiff\n"), "{text}");
-        assert!(text.contains("\"/opt/app/diskdiff-cli\" call list_scans"), "{text}");
+        let files = write_skill(&home, "\"/opt/app/diskdiff-cli\"").unwrap();
+        let claude = home.join(".claude").join("skills").join("diskdiff").join("SKILL.md");
+        let agents = home.join(".agents").join("skills").join("diskdiff").join("SKILL.md");
+        assert_eq!(files, vec![claude.clone(), agents.clone()]);
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            assert!(text.starts_with("---\nname: diskdiff\n"), "{text}");
+            assert!(text.contains("\"/opt/app/diskdiff-cli\" call list_scans"), "{text}");
+        }
 
         // A second install replaces the first.
-        write_claude_skill(&home, "\"/opt/apps/DiskDiff.AppImage\" cli").unwrap();
-        let text = std::fs::read_to_string(&file).unwrap();
-        assert!(text.contains("\"/opt/apps/DiskDiff.AppImage\" cli call list_scans"), "{text}");
-        assert!(!text.contains("/opt/app/diskdiff-cli"), "{text}");
+        write_skill(&home, "\"/opt/apps/DiskDiff.AppImage\" cli").unwrap();
+        for file in [&claude, &agents] {
+            let text = std::fs::read_to_string(file).unwrap();
+            assert!(text.contains("\"/opt/apps/DiskDiff.AppImage\" cli call list_scans"), "{text}");
+            assert!(!text.contains("/opt/app/diskdiff-cli"), "{text}");
+        }
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

@@ -1,7 +1,9 @@
 //! The tools: definitions (name, description, schema, annotations) and the
 //! handlers, each a thin wrapper over an engine function.
 //!
-//! Results are JSON objects with exact byte counts plus `*_human` strings.
+//! Results are compact JSON objects, lean so they fit an agent's context:
+//! paths in lists are relative to the result's `path`, and sizes in lists
+//! are bytes only (totals also come as `*_human` strings).
 //! Lists come in pages (`offset`, `limit`, `next_offset`) so one call cannot
 //! flood an agent's context, yet every scan, folder and file is reachable.
 
@@ -231,6 +233,15 @@ fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+/// `p` relative to `base` when inside it (how list rows spell paths, `base`
+/// being the result's `path`), else in full.
+fn rel_str(base: &Path, p: &Path) -> String {
+    match p.strip_prefix(base) {
+        Ok(r) if !r.as_os_str().is_empty() => path_str(r),
+        _ => path_str(p),
+    }
+}
+
 fn size_obj(m: &mut Map<String, Value>, key: &str, n: u64) {
     m.insert(key.into(), json!(n));
     m.insert(format!("{key}_human"), json!(bytes(n)));
@@ -377,26 +388,23 @@ fn item_json(it: &Item, dir: &Path, comparing: bool) -> Value {
         kind_of(it.is_dir)
     };
     m.insert("kind".into(), json!(kind));
-    if !it.placeholder {
-        m.insert("path".into(), json!(path_str(&dir.join(&*it.name))));
-    }
-    size_obj(&mut m, "size", it.size);
+    m.insert("size".into(), json!(it.size));
     if comparing {
         if it.has_delta() {
             if let Some(p) = it.prev {
                 m.insert("prev_size".into(), json!(p));
             }
-            delta_obj(&mut m, "delta", it.delta());
+            m.insert("delta".into(), json!(it.delta()));
             if it.moved_bytes != 0 {
-                delta_obj(&mut m, "moved_bytes", it.moved_bytes);
-                delta_obj(&mut m, "change", it.change());
+                m.insert("moved_bytes".into(), json!(it.moved_bytes));
+                m.insert("change".into(), json!(it.change()));
             }
         }
         let status = if it.moved.is_some() { "moved" } else { status_str(it.status) };
         m.insert("status".into(), json!(status));
         if let Some(mv) = &it.moved {
             let key = if mv.arrived { "moved_from" } else { "moved_to" };
-            m.insert(key.into(), json!(path_str(&mv.other)));
+            m.insert(key.into(), json!(rel_str(dir, &mv.other)));
         }
     }
     if it.is_dir {
@@ -430,7 +438,7 @@ fn largest_files(ctx: &Ctx, a: &Args) -> Result<Value> {
     page_info(&mut out, offset, files.len(), None, full);
     out.insert(
         "files".into(),
-        json!(files.iter().map(|(p, n)| json!({"path": path_str(p), "size": n, "size_human": bytes(*n)})).collect::<Vec<_>>()),
+        json!(files.iter().map(|(p, n)| json!({"path": rel_str(&abs, p), "size": n})).collect::<Vec<_>>()),
     );
     Ok(Value::Object(out))
 }
@@ -445,7 +453,7 @@ fn largest_folders(ctx: &Ctx, a: &Args) -> Result<Value> {
         "scan": scan_brief(cur),
         "note": "A folder that is 90% or more one subfolder is left out in favour of that subfolder.",
         "folders": folders.iter().map(|f| json!({
-            "path": path_str(&f.path), "size": f.size, "size_human": bytes(f.size), "files": f.files, "dirs": f.dirs,
+            "path": path_str(&f.path), "size": f.size, "files": f.files, "dirs": f.dirs,
         })).collect::<Vec<_>>(),
     }))
 }
@@ -502,7 +510,7 @@ fn what_changed(ctx: &Ctx, a: &Args) -> Result<Value> {
                 bytes(sum.moved)
             )),
         );
-        (sum.changes.iter().map(change_json).collect(), moves.list.iter().collect())
+        (sum.changes.iter().map(|c| change_json(c, base)).collect(), moves.list.iter().collect())
     } else {
         let (now, then) = (query::size_at(&store, cur, &abs)?, query::size_at(&store, cmp, &abs)?);
         let (Some(now), Some(then)) = (now, then) else {
@@ -542,12 +550,12 @@ fn what_changed(ctx: &Ctx, a: &Args) -> Result<Value> {
         let rows = v
             .iter()
             .map(|c| {
-                let mut row = change_json(c);
+                let mut row = change_json(c, &abs);
                 if c.status == Status::Removed
                     && let Some(m) = moves.from(&c.path)
                 {
                     row["status"] = json!("moved");
-                    row["moved_to"] = json!(path_str(&m.to));
+                    row["moved_to"] = json!(rel_str(&abs, &m.to));
                 }
                 row
             })
@@ -555,6 +563,7 @@ fn what_changed(ctx: &Ctx, a: &Args) -> Result<Value> {
         (rows, under)
     };
     out.insert("changes".into(), json!(rows));
+    let list_base = PathBuf::from(out["path"].as_str().unwrap_or_default());
     let mut by_size = moved_list;
     by_size.sort_by_key(|m| std::cmp::Reverse(m.size));
     let mut mv = Map::new();
@@ -567,8 +576,8 @@ fn what_changed(ctx: &Ctx, a: &Args) -> Result<Value> {
                 .iter()
                 .take(10)
                 .map(|m| json!({
-                    "from": path_str(&m.from), "to": path_str(&m.to), "kind": kind_of(m.is_dir),
-                    "size": m.size, "size_human": bytes(m.size), "size_after": m.after,
+                    "from": rel_str(&list_base, &m.from), "to": rel_str(&list_base, &m.to), "kind": kind_of(m.is_dir),
+                    "size": m.size, "size_after": m.after,
                 }))
                 .collect::<Vec<_>>()
         ),
@@ -577,20 +586,20 @@ fn what_changed(ctx: &Ctx, a: &Args) -> Result<Value> {
     Ok(Value::Object(out))
 }
 
-fn change_json(c: &query::Change) -> Value {
+fn change_json(c: &query::Change, base: &Path) -> Value {
     let mut m = Map::new();
-    m.insert("path".into(), json!(path_str(&c.path)));
+    m.insert("path".into(), json!(rel_str(base, &c.path)));
     m.insert("kind".into(), json!(kind_of(c.is_dir)));
     m.insert("status".into(), json!(if c.moved_from.is_some() { "moved" } else { status_str(c.status) }));
-    size_obj(&mut m, "size", c.size);
+    m.insert("size".into(), json!(c.size));
     m.insert("prev_size".into(), json!(c.prev));
-    delta_obj(&mut m, "delta", c.delta());
+    m.insert("delta".into(), json!(c.delta()));
     if let Some(from) = &c.moved_from {
-        m.insert("moved_from".into(), json!(path_str(from)));
+        m.insert("moved_from".into(), json!(rel_str(base, from)));
     }
     if c.moved_bytes != 0 {
-        delta_obj(&mut m, "moved_bytes", c.moved_bytes);
-        delta_obj(&mut m, "change", c.change());
+        m.insert("moved_bytes".into(), json!(c.moved_bytes));
+        m.insert("change".into(), json!(c.change()));
     }
     Value::Object(m)
 }
@@ -686,9 +695,9 @@ fn growth(ctx: &Ctx, a: &Args) -> Result<Value> {
             let mut m = Map::new();
             m.insert("scan".into(), json!(s.id));
             m.insert("finished".into(), json!(iso(s.finished_at)));
-            size_obj(&mut m, "size", *n);
+            m.insert("size".into(), json!(*n));
             if i > 0 {
-                delta_obj(&mut m, "delta", *n as i64 - points[i - 1].1 as i64);
+                m.insert("delta".into(), json!(*n as i64 - points[i - 1].1 as i64));
             }
             Value::Object(m)
         })
@@ -726,9 +735,9 @@ fn growth(ctx: &Ctx, a: &Args) -> Result<Value> {
                     .take(10)
                     .map(|(name, c)| {
                         let mut m = Map::new();
-                        m.insert("path".into(), json!(path_str(&abs.join(&**name))));
-                        size_obj(&mut m, "churn", *c);
-                        delta_obj(&mut m, "net", net.get(name).copied().unwrap_or(0));
+                        m.insert("path".into(), json!(&**name));
+                        m.insert("churn".into(), json!(*c));
+                        m.insert("net".into(), json!(net.get(name).copied().unwrap_or(0)));
                         Value::Object(m)
                     })
                     .collect::<Vec<_>>()
@@ -742,7 +751,7 @@ fn list_files(ctx: &Ctx, a: &Args) -> Result<Value> {
     let store = ctx.store()?;
     let scans = store.scans()?;
     let (cur, abs) = select::locate(&scans, a.scan("scan", false)?, a.str("path")?)?;
-    let limit = a.limit("limit", 500, 1000)?;
+    let limit = a.limit("limit", 200, 1000)?;
     let offset = a.offset()?;
     let min = a.u64("min_size")?.unwrap_or(0);
     let (want_files, want_dirs) = match a.str("kind")?.unwrap_or("all") {
@@ -756,9 +765,9 @@ fn list_files(ctx: &Ctx, a: &Args) -> Result<Value> {
         if (if e.is_dir { want_dirs } else { want_files }) && e.size >= min {
             if total >= offset && rows.len() < limit {
                 let mut m = Map::new();
-                m.insert("path".into(), json!(path_str(e.path)));
+                m.insert("path".into(), json!(rel_str(&abs, e.path)));
                 m.insert("kind".into(), json!(kind_of(e.is_dir)));
-                size_obj(&mut m, "size", e.size);
+                m.insert("size".into(), json!(e.size));
                 if e.is_dir {
                     m.insert("files".into(), json!(e.files));
                     m.insert("dirs".into(), json!(e.dirs));
@@ -925,7 +934,7 @@ pub fn definitions() -> Vec<Value> {
                 "scan": scan(),
                 "kind": {"type": "string", "enum": ["all", "files", "folders"], "description": "Which entries: \"all\" (default), \"files\" or \"folders\"."},
                 "min_size": {"type": "integer", "minimum": 0, "description": "Only entries of at least this many bytes (default 0)."},
-                "limit": limit_prop(500, 1000),
+                "limit": limit_prop(200, 1000),
                 "offset": offset_prop(),
             }),
             &[],

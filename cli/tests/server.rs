@@ -163,7 +163,10 @@ fn read_tools() {
 
     let lf = ok(&c, "largest_files", json!({"limit": 3}));
     assert!(lf["files"][0]["path"].as_str().unwrap().ends_with("film.mp4"));
-    assert_eq!(lf["files"][0]["size_human"], "3.15 MB");
+    // Lean rows: the path relative to the listed folder, the size in bytes.
+    assert_eq!(lf["files"][0]["path"], sep("Movies/film.mp4"));
+    assert!(lf["files"][0]["size"].as_u64().unwrap() >= 3 * MB as u64);
+    assert!(lf["files"][0].get("size_human").is_none());
     assert_eq!(lf["files"].as_array().unwrap().len(), 3);
     let lf = ok(&c, "largest_files", json!({"path": p(&f.root, "Photos")}));
     assert_eq!(lf["files"].as_array().unwrap().len(), 4);
@@ -175,7 +178,7 @@ fn read_tools() {
     let w = ok(&c, "what_changed", json!({}));
     assert_eq!(w["from"]["id"], ids[1]);
     assert_eq!(w["moves"]["count"], 1);
-    assert_eq!(w["moves"]["largest"][0]["from"], p(&f.root, "Downloads/film.mp4"));
+    assert_eq!(w["moves"]["largest"][0]["from"], sep("Downloads/film.mp4"));
     let mv = find(&w["changes"], "path", "Movies/film.mp4");
     assert_eq!(mv["status"], "moved");
     assert!(w["summary"].as_str().unwrap().contains("moved"));
@@ -513,13 +516,13 @@ fn every_file_is_reachable() {
     }
     assert_eq!(seen.len(), 13);
     for rel in ["Project/node_modules/pkg9/index.js", "Photos/e.jpg", "Movies/film.mp4", "Downloads/notes.txt"] {
-        assert!(seen.contains(&p(&f.root, rel)), "{rel} missing from {seen:#?}");
+        assert!(seen.contains(&sep(rel)), "{rel} missing from {seen:#?}");
     }
     // A folder comes right before its contents.
     let all = ok(&c, "list_files", json!({"path": root, "limit": 1000}));
     let paths: Vec<&str> = all["entries"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
-    let photos = paths.iter().position(|x| *x == p(&f.root, "Photos")).unwrap();
-    assert_eq!(paths[photos + 1], p(&f.root, "Photos/b.jpg"));
+    let photos = paths.iter().position(|x| *x == "Photos").unwrap();
+    assert_eq!(paths[photos + 1], sep("Photos/b.jpg"));
     assert_eq!(all["next_offset"], Value::Null);
 
     // browse: the second page holds what the first left out.

@@ -15,7 +15,7 @@ Usage:
       [--scan <id>]                  which scan (default: the latest holding <path>)
       [--from <id>]                  every change since that scan instead
   diskdiff-cli guide                 how an agent with a terminal uses this tool
-  diskdiff-cli skill                 the same as a Claude Code skill (SKILL.md)
+  diskdiff-cli skill                 the same as an agent skill (SKILL.md)
   diskdiff-cli mcp                   run the MCP server on stdin/stdout
   diskdiff-cli --help | --version
 
@@ -129,7 +129,8 @@ fn main() -> ExitCode {
 }
 
 fn print(v: &serde_json::Value) -> ExitCode {
-    println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    // Compact: indentation would only cost an agent tokens.
+    println!("{}", serde_json::to_string(v).unwrap_or_default());
     ExitCode::SUCCESS
 }
 

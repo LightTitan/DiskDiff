@@ -71,20 +71,23 @@ the cleanup suggestions and the largest items as Markdown, ending with a questio
 Paste it into ChatGPT, Claude or any other chat. It's a summary only, and it includes folder
 and file names from the scan. `diskdiff-cli report [<path>]` prints the same report.
 
-### Claude Code (skill)
+### AI agents with a terminal (skill)
 
-**Help → Install Claude Code skill** saves a skill to `~/.claude/skills/diskdiff/SKILL.md`.
-When you ask Claude Code about disk space, it runs `diskdiff-cli` itself and can dig through
-the whole scan history: browse folders, compare any two scans, follow a folder's growth and
-start new scans. No MCP config needed. To install it by hand:
+**Help → Install skill for AI agents** saves a skill to `~/.claude/skills/diskdiff/SKILL.md`
+for Claude Code and to `~/.agents/skills/diskdiff/SKILL.md`, which Codex, Cursor, Gemini CLI
+and GitHub Copilot read. When you ask about disk space, the agent runs `diskdiff-cli` itself and
+can dig through the whole scan history: browse folders, compare any two scans, follow a
+folder's growth, read every file of a scan and start new scans. No MCP config needed.
+
+For any other agent, or one on a different setup, **Help → Copy setup prompt for AI agents**
+copies a prompt with the right path: paste it into the agent and it saves the skill where it
+loads skills, or adds `diskdiff-cli guide` to its instructions if it has no skills. To install
+the skill by hand:
 
 ```sh
 mkdir -p ~/.claude/skills/diskdiff
 /Applications/DiskDiff.app/Contents/MacOS/diskdiff-cli skill > ~/.claude/skills/diskdiff/SKILL.md
 ```
-
-Other agents with a terminal (Codex, Cursor…) can use the CLI the same way; `diskdiff-cli guide`
-prints a how-to for `AGENTS.md` or similar.
 
 ### MCP (Claude Desktop, Cursor…)
 

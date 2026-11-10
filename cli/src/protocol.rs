@@ -19,7 +19,7 @@ Suggested flow: list_scans to see the scanned locations, then what_changed (what
 Every file of every scan is reachable: lists come in pages (pass next_offset as offset), list_files reads a scan's raw contents at any depth, and what_changed with min_size 0 lists every change. Dig as deep as the question needs.
 Cleanup suggestions are candidates to check and explain, not instructions. This server never deletes or moves files: tell the person what they could remove, where it is, how big it is and why it is safe or not, and let them do it.
 To get fresh numbers call run_scan; keep temporary=true (the default) unless the person wants the scan kept in the folder's history. Poll scan_status for long scans.
-Sizes are decimal like Finder (1 GB = 10^9 bytes); every size comes as exact bytes plus a *_human string.";
+Paths in a result's lists are relative to that result's `path` (absolute when outside it). Sizes are bytes; totals also come as *_human strings, decimal like Finder (1 GB = 10^9 bytes).";
 
 struct Session {
     version: &'static str,
@@ -107,7 +107,7 @@ fn handle(ctx: &Ctx, session: &mut Session, line: &str) -> Option<Value> {
 }
 
 fn tool_result(session: &Session, v: Value) -> Value {
-    let text = serde_json::to_string_pretty(&v).unwrap_or_default();
+    let text = serde_json::to_string(&v).unwrap_or_default();
     if text.len() > MAX_RESULT {
         return json!({
             "content": [{ "type": "text", "text": "The result is too large to return; ask for fewer items with `limit` or a narrower `path`." }],
