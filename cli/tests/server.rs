@@ -274,7 +274,7 @@ fn json_rpc() {
     assert!(instr.contains("never deletes") && instr.contains("temporary=true") && instr.contains("10^9"));
 
     let tools = replies[1]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 10);
     for t in tools {
         assert_eq!(t["inputSchema"]["additionalProperties"], false, "{}", t["name"]);
         let ro = t["annotations"]["readOnlyHint"].as_bool().unwrap();
@@ -488,4 +488,61 @@ fn guide_and_skill_name_the_command() {
     let skill = diskdiff_cli::report::skill("diskdiff-cli");
     assert!(skill.starts_with("---\nname: diskdiff\ndescription: \""), "{skill}");
     assert!(skill.contains("\n---\n\n# DiskDiff"), "{skill}");
+}
+
+/// Paging reaches every file: list_files page by page, browse past its
+/// limit, and the export with no limit at all.
+#[test]
+fn every_file_is_reachable() {
+    let f = fixture("all");
+    let c = ctx(&f.store);
+    let root = f.root.to_string_lossy().into_owned();
+    // The latest scan has 4 + 1 + 4 + 1 + 2 + 1 = 13 files:
+    // node_modules pkg0-3 and pkg9, main.rs, 4 photos, archive.zip,
+    // notes.txt and film.mp4.
+    let mut seen = Vec::new();
+    let mut offset = json!(0);
+    while !offset.is_null() {
+        let v = ok(&c, "list_files", json!({"path": root, "kind": "files", "limit": 4, "offset": offset}));
+        assert_eq!(v["total"], 13);
+        for e in v["entries"].as_array().unwrap() {
+            assert_eq!(e["kind"], "file");
+            seen.push(e["path"].as_str().unwrap().to_owned());
+        }
+        offset = v["next_offset"].clone();
+    }
+    assert_eq!(seen.len(), 13);
+    for rel in ["Project/node_modules/pkg9/index.js", "Photos/e.jpg", "Movies/film.mp4", "Downloads/notes.txt"] {
+        assert!(seen.contains(&p(&f.root, rel)), "{rel} missing from {seen:#?}");
+    }
+    // A folder comes right before its contents.
+    let all = ok(&c, "list_files", json!({"path": root, "limit": 1000}));
+    let paths: Vec<&str> = all["entries"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
+    let photos = paths.iter().position(|x| *x == p(&f.root, "Photos")).unwrap();
+    assert_eq!(paths[photos + 1], p(&f.root, "Photos/b.jpg"));
+    assert_eq!(all["next_offset"], Value::Null);
+
+    // browse: the second page holds what the first left out.
+    let photos = p(&f.root, "Photos");
+    let first = ok(&c, "browse", json!({"path": photos, "limit": 3}));
+    assert_eq!(first["total"], 5); // 4 photos and the removed a.jpg
+    let second = ok(&c, "browse", json!({"path": photos, "limit": 3, "offset": first["next_offset"]}));
+    assert_eq!(second["items"].as_array().unwrap().len(), 2);
+    assert_eq!(second["next_offset"], Value::Null);
+
+    // export: every folder and file, one per line after two header lines.
+    let o = diskdiff_cli::export::Options { path: Some(root.clone()), ..Default::default() };
+    let mut out = Vec::new();
+    diskdiff_cli::export::run(&c, &o, &mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().skip(2).collect();
+    assert_eq!(lines.len(), paths.len());
+    assert!(lines.iter().any(|l| l.ends_with(&p(&f.root, "Movies/film.mp4")) && l.contains("\tfile\t")));
+
+    // export --from: every change, however small.
+    let o = diskdiff_cli::export::Options { path: Some(root), from: Some("previous".into()), ..Default::default() };
+    let mut out = Vec::new();
+    diskdiff_cli::export::run(&c, &o, &mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.lines().any(|l| l.contains("\tremoved\tfile\t") && l.ends_with(&p(&f.root, "Photos/a.jpg"))), "{text}");
 }

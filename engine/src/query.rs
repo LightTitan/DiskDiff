@@ -337,7 +337,7 @@ pub fn changes(store: &Store, cur: &ScanInfo, cmp: &ScanInfo, abs: &Path, limit:
             out.push(Change { path: path.join(&*f.name), is_dir: false, size: 0, prev: f.size, status: Status::Removed, moved_bytes: 0, moved_from: None });
         }
         // Keep memory bounded on huge diffs.
-        if out.len() > limit * 8 {
+        if out.len() > limit.saturating_mul(8) {
             trim(&mut out, limit);
         }
     }
@@ -348,6 +348,50 @@ pub fn changes(store: &Store, cur: &ScanInfo, cmp: &ScanInfo, abs: &Path, limit:
 fn trim(v: &mut Vec<Change>, limit: usize) {
     v.sort_unstable_by_key(|c| std::cmp::Reverse(c.delta().unsigned_abs()));
     v.truncate(limit);
+}
+
+/// One folder or file met by [`walk`].
+pub struct Entry<'a> {
+    /// Absolute path.
+    pub path: &'a Path,
+    pub is_dir: bool,
+    pub size: u64,
+    /// Files and folders inside (0 for a file).
+    pub files: u64,
+    pub dirs: u64,
+}
+
+/// Every folder and file under `abs` in one scan, `abs` itself left out:
+/// depth first in name order, each folder right before its contents, a
+/// folder's files before its subfolders. `visit` returns false to stop.
+/// Returns false when the scan has no folder `abs`.
+pub fn walk(store: &Store, scan: &ScanInfo, abs: &Path, visit: &mut dyn FnMut(&Entry) -> bool) -> Result<bool> {
+    let Some((h, _)) = open(store, Some(scan), abs)? else { return Ok(false) };
+    // The folder's own size, files and dirs: None for `abs`.
+    type Own = Option<(u64, u64, u64)>;
+    let mut stack: Vec<(PathBuf, Hash, Own)> = vec![(abs.to_owned(), h, None)];
+    while let Some((path, h, own)) = stack.pop() {
+        if let Some((size, files, dirs)) = own
+            && !visit(&Entry { path: &path, is_dir: true, size, files, dirs })
+        {
+            return Ok(true);
+        }
+        let n = store.node(&h)?;
+        let mut names: Vec<&crate::node::FileChild> = n.files.iter().collect();
+        names.sort_by(|a, b| a.name.cmp(&b.name));
+        for f in names {
+            let fp = path.join(&*f.name);
+            if !visit(&Entry { path: &fp, is_dir: false, size: f.size, files: 0, dirs: 0 }) {
+                return Ok(true);
+            }
+        }
+        let mut dirs: Vec<&crate::node::DirChild> = n.dirs.iter().collect();
+        dirs.sort_by(|a, b| b.name.cmp(&a.name));
+        for d in dirs {
+            stack.push((path.join(&*d.name), d.hash, Some((d.size, d.files, d.dirs))));
+        }
+    }
+    Ok(true)
 }
 
 /// Every file under `abs` in one scan, largest first, up to `limit`.

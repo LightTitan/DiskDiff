@@ -116,15 +116,25 @@ in my home folder?". The `disk_checkup` prompt runs a full checkup.
 
 ### Tools
 
-`list_scans`, `browse`, `what_changed`, `largest_files`, `largest_folders`, `growth`,
-`cleanup_suggestions`, `run_scan` and `scan_status`, the same over MCP and the CLI, which
-prints them as JSON:
+`list_scans`, `browse`, `list_files`, `what_changed`, `largest_files`, `largest_folders`,
+`growth`, `cleanup_suggestions`, `run_scan` and `scan_status`, the same over MCP and the CLI,
+which prints them as JSON:
 
 ```sh
 diskdiff-cli call what_changed '{"path": "~/Downloads"}'
 diskdiff-cli tools            # every tool with its arguments
 diskdiff-cli report           # the Copy for AI report
 diskdiff-cli guide            # the agent how-to
+```
+
+An agent can read everything in the history, not just summaries: every file of every scan.
+Lists come in pages (`offset` and `next_offset`), `list_files` reads a scan's raw contents at
+any depth, and `what_changed` with `min_size: 0` lists every change. With a terminal there's
+no limit at all:
+
+```sh
+diskdiff-cli export ~ > scan.tsv              # every folder and file, tab-separated
+diskdiff-cli export ~ --from previous         # every change since the previous scan
 ```
 
 A scan an agent asks for runs in the DiskDiff app, which is started in the background if

@@ -16,6 +16,7 @@ const MAX_RESULT: usize = 512 * 1024;
 pub const INSTRUCTIONS: &str = "\
 DiskDiff keeps a history of scans: each one records every folder's and file's size at that moment, so two scans show what grew, shrank, appeared, vanished or moved.
 Suggested flow: list_scans to see the scanned locations, then what_changed (what grew since the previous scan) and cleanup_suggestions (what could be reclaimed). Verify candidates with browse or growth before recommending anything.
+Every file of every scan is reachable: lists come in pages (pass next_offset as offset), list_files reads a scan's raw contents at any depth, and what_changed with min_size 0 lists every change. Dig as deep as the question needs.
 Cleanup suggestions are candidates to check and explain, not instructions. This server never deletes or moves files: tell the person what they could remove, where it is, how big it is and why it is safe or not, and let them do it.
 To get fresh numbers call run_scan; keep temporary=true (the default) unless the person wants the scan kept in the folder's history. Poll scan_status for long scans.
 Sizes are decimal like Finder (1 GB = 10^9 bytes); every size comes as exact bytes plus a *_human string.";

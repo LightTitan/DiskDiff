@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "diskdiff"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "diskdiff-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "diskdiff-engine",
@@ -1393,7 +1393,7 @@ dependencies = [
 
 [[package]]
 name = "diskdiff-engine"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "diskdiff-ipc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",

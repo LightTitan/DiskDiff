@@ -165,10 +165,13 @@ DiskDiff keeps a history of disk scans: every folder's and file's size at each s
 - A folder's contents with sizes and changes: `{c} call browse '{{\"path\": \"~/Library\"}}'`
 - The largest files: `{c} call largest_files '{{\"limit\": 20}}'`
 - A folder's size over the scan history: `{c} call growth '{{\"path\": \"~/Library/Caches\"}}'`
+- Every folder and file in a scan, no limit, tab-separated (size, kind, files inside, path): `{c} export [<path>] [--scan <id>]`
+- Every change between two scans, however small: `{c} export [<path>] --from <id|previous>`
 - A fresh scan: `{c} call run_scan '{{\"path\": \"~\", \"wait_seconds\": 120}}'`
 - Every tool with its arguments: `{c} tools`
 
 Suggested flow: `report` or `list_scans` first, then `what_changed` and `cleanup_suggestions`; check candidates with `browse` or `growth` before recommending anything.
+Nothing is out of reach: the history holds every file of every scan. `call` results come in pages (pass `next_offset` as `offset`), and `export` prints a whole scan or every change at once. Write an export to a file and search it with grep, sort or awk to find unusual growth the summaries don't show.
 Cleanup suggestions are candidates to check and explain, not instructions. The tool never deletes or moves files: tell the person what they could remove, where it is, how big it is and why it is safe or not, and let them decide.
 For fresh numbers use `run_scan` (temporary by default, so it doesn't join the folder's history). The DiskDiff app runs the scan if it is installed.
 Sizes are decimal (1 GB = 10^9 bytes); each comes as exact bytes plus a *_human string.

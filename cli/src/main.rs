@@ -1,7 +1,7 @@
 //! `diskdiff-cli`: a command-line tool for agents that work through a shell,
 //! and (`diskdiff-cli mcp`) DiskDiff's MCP server.
 
-use diskdiff_cli::{CallError, Config, Ctx, protocol, report, select};
+use diskdiff_cli::{CallError, Config, Ctx, export, protocol, report, select};
 use std::process::ExitCode;
 
 const HELP: &str = "\
@@ -11,6 +11,9 @@ Usage:
   diskdiff-cli call <tool> [<json>]  run one tool and print its JSON result
   diskdiff-cli tools                 list the tools and their argument schemas
   diskdiff-cli report [<path>]       Markdown report to paste into any AI chat
+  diskdiff-cli export [<path>]       every folder and file in a scan, tab-separated
+      [--scan <id>]                  which scan (default: the latest holding <path>)
+      [--from <id>]                  every change since that scan instead
   diskdiff-cli guide                 how an agent with a terminal uses this tool
   diskdiff-cli skill                 the same as a Claude Code skill (SKILL.md)
   diskdiff-cli mcp                   run the MCP server on stdin/stdout
@@ -20,6 +23,8 @@ Examples:
   claude mcp add diskdiff -- /path/to/diskdiff-cli mcp
   diskdiff-cli call list_scans
   diskdiff-cli report ~/Downloads
+  diskdiff-cli export ~ > scan.tsv
+  diskdiff-cli export ~ --from previous | head -50
   diskdiff-cli skill > ~/.claude/skills/diskdiff/SKILL.md
   diskdiff-cli call what_changed '{\"path\": \"~/Downloads\"}'
   diskdiff-cli call run_scan '{\"path\": \"~/Projects\", \"wait_seconds\": 60}'
@@ -71,6 +76,19 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("export") => {
+            let run = || -> anyhow::Result<()> {
+                let o = export::Options::parse(&args[1..])?;
+                export::run(&ctx(), &o, &mut std::io::stdout().lock())
+            };
+            match run() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("diskdiff-cli: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("call") => {
             let Some(tool) = args.get(1) else {
                 eprintln!("usage: diskdiff-cli call <tool> [<json arguments>]");

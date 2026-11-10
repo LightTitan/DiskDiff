@@ -1,8 +1,9 @@
 //! The tools: definitions (name, description, schema, annotations) and the
 //! handlers, each a thin wrapper over an engine function.
 //!
-//! Results are JSON objects with exact byte counts plus `*_human` strings,
-//! and every list is capped so one call cannot flood an agent's context.
+//! Results are JSON objects with exact byte counts plus `*_human` strings.
+//! Lists come in pages (`offset`, `limit`, `next_offset`) so one call cannot
+//! flood an agent's context, yet every scan, folder and file is reachable.
 
 use crate::format::{bytes, delta, iso};
 use crate::scan;
@@ -83,6 +84,7 @@ pub fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<Value, CallError> {
         "what_changed" => what_changed,
         "cleanup_suggestions" => cleanup_suggestions,
         "growth" => growth,
+        "list_files" => list_files,
         "run_scan" => run_scan,
         "scan_status" => scan_status,
         _ => return Err(CallError::Unknown(name.into())),
@@ -151,6 +153,10 @@ impl Args {
 
     fn limit(&self, k: &str, default: usize, max: usize) -> Result<usize> {
         Ok(self.u64(k)?.map_or(default, |n| (n as usize).clamp(1, max)))
+    }
+
+    fn offset(&self) -> Result<usize> {
+        Ok(self.u64("offset")?.unwrap_or(0) as usize)
     }
 
     /// A scan id, or "latest" / "previous" (and "none" where `allow_none`).
@@ -259,12 +265,23 @@ fn detect_moves(store: &Store, cur: &ScanInfo, cmp: Option<&ScanInfo>) -> Result
     }
 }
 
+/// Where a page sits in the whole list: `offset`, and `next_offset` to pass
+/// for the next page (null on the last one). `total` when it is known.
+fn page_info(out: &mut Map<String, Value>, offset: usize, shown: usize, total: Option<usize>, more: bool) {
+    if let Some(t) = total {
+        out.insert("total".into(), json!(t));
+    }
+    out.insert("offset".into(), json!(offset));
+    out.insert("next_offset".into(), if more { json!(offset + shown) } else { Value::Null });
+}
+
 // ---- handlers -----------------------------------------------------------
 
 fn list_scans(ctx: &Ctx, a: &Args) -> Result<Value> {
     let store = ctx.store()?;
     let mut scans = store.scans()?;
     let limit = a.limit("limit", 50, 500)?;
+    let offset = a.offset()?;
     if let Some(root) = a.str("root")? {
         let abs = match select::parse_path(root)? {
             select::PathArg::Abs(p) => p,
@@ -285,13 +302,17 @@ fn list_scans(ctx: &Ctx, a: &Args) -> Result<Value> {
     }
     let total = scans.len();
     scans.reverse();
-    scans.truncate(limit);
-    Ok(json!({
-        "count": total,
-        "shown": scans.len(),
-        "locations": locations.iter().map(|(root, n, last)| json!({"root": root, "scans": n, "last_scan": iso(*last)})).collect::<Vec<_>>(),
-        "scans": scans.iter().map(scan_full).collect::<Vec<_>>(),
-    }))
+    let page: Vec<&ScanInfo> = scans.iter().skip(offset).take(limit).collect();
+    let mut out = Map::new();
+    out.insert("count".into(), json!(total));
+    out.insert("shown".into(), json!(page.len()));
+    page_info(&mut out, offset, page.len(), None, offset + page.len() < total);
+    out.insert(
+        "locations".into(),
+        json!(locations.iter().map(|(root, n, last)| json!({"root": root, "scans": n, "last_scan": iso(*last)})).collect::<Vec<_>>()),
+    );
+    out.insert("scans".into(), json!(page.into_iter().map(scan_full).collect::<Vec<_>>()));
+    Ok(Value::Object(out))
 }
 
 fn browse(ctx: &Ctx, a: &Args) -> Result<Value> {
@@ -300,6 +321,7 @@ fn browse(ctx: &Ctx, a: &Args) -> Result<Value> {
     let (cur, abs) = select::locate(&scans, a.scan("scan", false)?, a.str("path")?)?;
     let cmp = select::compare(&scans, cur, a.scan("compare_to", true)?)?;
     let limit = a.limit("limit", 50, 500)?;
+    let offset = a.offset()?;
     let moves = detect_moves(&store, cur, cmp)?;
     // A folder that arrived by a move is compared with where it was.
     let prev_abs = moves.before(&abs).unwrap_or_else(|| abs.clone());
@@ -317,7 +339,8 @@ fn browse(ctx: &Ctx, a: &Args) -> Result<Value> {
     l.items.sort_by_key(|i| std::cmp::Reverse(if i.status == Status::Removed { i.prev.unwrap_or(0) } else { i.size }));
     let comparing = cmp.is_some();
     let total = l.items.len();
-    let rest = l.items.split_off(total.min(limit));
+    let rest = l.items.split_off(total.min(offset.saturating_add(limit)));
+    l.items.drain(..total.min(offset));
 
     let mut out = Map::new();
     out.insert("path".into(), json!(path_str(&abs)));
@@ -332,6 +355,7 @@ fn browse(ctx: &Ctx, a: &Args) -> Result<Value> {
         size_obj(&mut out, "prev_size", p);
         delta_obj(&mut out, "delta", l.size as i64 - p as i64);
     }
+    page_info(&mut out, offset, l.items.len(), Some(total), !rest.is_empty());
     out.insert("items".into(), json!(l.items.iter().map(|i| item_json(i, &abs, comparing)).collect::<Vec<_>>()));
     if !rest.is_empty() {
         let mut more = Map::new();
@@ -392,23 +416,30 @@ fn largest_files(ctx: &Ctx, a: &Args) -> Result<Value> {
     let store = ctx.store()?;
     let scans = store.scans()?;
     let (cur, abs) = select::locate(&scans, a.scan("scan", false)?, a.str("path")?)?;
-    let limit = a.limit("limit", 25, 200)?;
-    let files = query::largest_files(&store, cur, &abs, limit)?;
-    if files.is_empty() && store.resolve(&cur.root_hash, &query::rel_in(cur, &abs).unwrap_or_default())?.is_none() {
+    let limit = a.limit("limit", 25, 500)?;
+    let offset = a.offset()?;
+    let mut files = query::largest_files(&store, cur, &abs, offset.saturating_add(limit))?;
+    let full = files.len() == offset.saturating_add(limit);
+    files.drain(..files.len().min(offset));
+    if files.is_empty() && offset == 0 && store.resolve(&cur.root_hash, &query::rel_in(cur, &abs).unwrap_or_default())?.is_none() {
         bail!("{} is not a folder in scan {} (of {})", abs.display(), cur.id, cur.root);
     }
-    Ok(json!({
-        "path": path_str(&abs),
-        "scan": scan_brief(cur),
-        "files": files.iter().map(|(p, n)| json!({"path": path_str(p), "size": n, "size_human": bytes(*n)})).collect::<Vec<_>>(),
-    }))
+    let mut out = Map::new();
+    out.insert("path".into(), json!(path_str(&abs)));
+    out.insert("scan".into(), scan_brief(cur));
+    page_info(&mut out, offset, files.len(), None, full);
+    out.insert(
+        "files".into(),
+        json!(files.iter().map(|(p, n)| json!({"path": path_str(p), "size": n, "size_human": bytes(*n)})).collect::<Vec<_>>()),
+    );
+    Ok(Value::Object(out))
 }
 
 fn largest_folders(ctx: &Ctx, a: &Args) -> Result<Value> {
     let store = ctx.store()?;
     let scans = store.scans()?;
     let cur = select::pick(&scans, a.scan("scan", false)?, None)?;
-    let limit = a.limit("limit", 25, 200)?;
+    let limit = a.limit("limit", 25, 500)?;
     let folders = insights::largest_folders(&store, cur, limit)?;
     Ok(json!({
         "scan": scan_brief(cur),
@@ -432,7 +463,9 @@ fn what_changed(ctx: &Ctx, a: &Args) -> Result<Value> {
         )
     })?;
     let min = a.u64("min_size")?.unwrap_or_else(|| change_threshold(cur));
-    let limit = a.limit("limit", 30, 200)?;
+    let limit = a.limit("limit", 30, 500)?;
+    let offset = a.offset()?;
+    let want = offset.saturating_add(limit);
 
     let mut out = Map::new();
     out.insert("from".into(), scan_brief(cmp));
@@ -447,7 +480,10 @@ fn what_changed(ctx: &Ctx, a: &Args) -> Result<Value> {
         if !cr.starts_with(pr) && !pr.starts_with(cr) {
             bail!("scans {} ({}) and {} ({}) do not overlap", cur.id, cur.root, cmp.id, cmp.root);
         }
-        let sum = insights::changes(&store, cur, cmp, min, limit)?;
+        let mut sum = insights::changes(&store, cur, cmp, min, want)?;
+        let full = sum.changes.len() >= want;
+        sum.changes.drain(..sum.changes.len().min(offset));
+        page_info(&mut out, offset, sum.changes.len(), None, full);
         out.insert("path".into(), json!(path_str(base)));
         delta_obj(&mut out, "total_delta", sum.total_delta);
         size_obj(&mut out, "added", sum.added);
@@ -488,9 +524,13 @@ fn what_changed(ctx: &Ctx, a: &Args) -> Result<Value> {
         );
         let under: Vec<&moves::Move> =
             moves.list.iter().filter(|m| m.from.starts_with(&abs) || m.to.starts_with(&abs)).collect();
-        let mut v = query::changes(&store, cur, cmp, &abs, limit * 2)?;
+        // Largest |delta| first, so the ones under `min` are all at the end.
+        let mut v = query::changes(&store, cur, cmp, &abs, want.saturating_add(1))?;
         v.retain(|c| c.delta().unsigned_abs() >= min);
-        v.truncate(limit);
+        let full = v.len() > want;
+        v.truncate(want);
+        v.drain(..v.len().min(offset));
+        page_info(&mut out, offset, v.len(), None, full);
         for c in &mut v {
             if c.status == Status::Added
                 && let Some(m) = moves.to(&c.path)
@@ -627,7 +667,7 @@ fn growth(ctx: &Ctx, a: &Args) -> Result<Value> {
     let store = ctx.store()?;
     let scans = store.scans()?;
     let (cur, abs) = select::locate(&scans, a.scan("scan", false)?, a.str("path")?)?;
-    let limit = a.limit("limit", 30, 200)?;
+    let limit = a.limit("limit", 30, 500)?;
     // Every saved scan up to `cur` that covers the path, whatever its root.
     let mut points: Vec<(&ScanInfo, u64)> = Vec::new();
     for s in scans.iter().filter(|s| {
@@ -698,6 +738,49 @@ fn growth(ctx: &Ctx, a: &Args) -> Result<Value> {
     Ok(Value::Object(out))
 }
 
+fn list_files(ctx: &Ctx, a: &Args) -> Result<Value> {
+    let store = ctx.store()?;
+    let scans = store.scans()?;
+    let (cur, abs) = select::locate(&scans, a.scan("scan", false)?, a.str("path")?)?;
+    let limit = a.limit("limit", 500, 1000)?;
+    let offset = a.offset()?;
+    let min = a.u64("min_size")?.unwrap_or(0);
+    let (want_files, want_dirs) = match a.str("kind")?.unwrap_or("all") {
+        "all" => (true, true),
+        "files" => (true, false),
+        "folders" => (false, true),
+        k => bail!("`kind` must be \"all\", \"files\" or \"folders\", not {k:?}"),
+    };
+    let (mut total, mut rows) = (0usize, Vec::new());
+    let found = query::walk(&store, cur, &abs, &mut |e| {
+        if (if e.is_dir { want_dirs } else { want_files }) && e.size >= min {
+            if total >= offset && rows.len() < limit {
+                let mut m = Map::new();
+                m.insert("path".into(), json!(path_str(e.path)));
+                m.insert("kind".into(), json!(kind_of(e.is_dir)));
+                size_obj(&mut m, "size", e.size);
+                if e.is_dir {
+                    m.insert("files".into(), json!(e.files));
+                    m.insert("dirs".into(), json!(e.dirs));
+                }
+                rows.push(Value::Object(m));
+            }
+            total += 1;
+        }
+        true
+    })?;
+    if !found {
+        bail!("{} is not a folder in scan {} (of {})", abs.display(), cur.id, cur.root);
+    }
+    let mut out = Map::new();
+    out.insert("path".into(), json!(path_str(&abs)));
+    out.insert("scan".into(), scan_brief(cur));
+    let shown = rows.len();
+    page_info(&mut out, offset, shown, Some(total), offset + shown < total);
+    out.insert("entries".into(), json!(rows));
+    Ok(Value::Object(out))
+}
+
 fn run_scan(ctx: &Ctx, a: &Args) -> Result<Value> {
     let raw = a.str("path")?.unwrap_or_default();
     let path = match select::parse_path(raw)? {
@@ -724,7 +807,11 @@ fn scan_prop(desc: &str, none: bool) -> Value {
 }
 
 fn limit_prop(default: u64, max: u64) -> Value {
-    json!({ "type": "integer", "minimum": 1, "maximum": max, "description": format!("How many to return (default {default}, at most {max}).") })
+    json!({ "type": "integer", "minimum": 1, "maximum": max, "description": format!("How many to return per page (default {default}, at most {max}).") })
+}
+
+fn offset_prop() -> Value {
+    json!({ "type": "integer", "minimum": 0, "description": "Skip this many (default 0). Pass the previous result's `next_offset` to get the next page." })
 }
 
 fn tool(name: &str, title: &str, description: &str, props: Value, required: &[&str], read_only: bool) -> Value {
@@ -754,6 +841,7 @@ pub fn definitions() -> Vec<Value> {
             json!({
                 "root": {"type": "string", "description": "Only scans that include this absolute path."},
                 "limit": limit_prop(50, 500),
+                "offset": offset_prop(),
             }),
             &[],
             true,
@@ -761,12 +849,13 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "browse",
             "Browse folder",
-            "Lists a folder's contents as of a scan, biggest first, with each item's change since an earlier scan: status added, removed, changed, unchanged or moved (with where from/to). By default compares the latest scan containing the path with the previous saved scan of the same location. Results are capped; `more` counts the rest.",
+            "Lists a folder's contents as of a scan, biggest first, with each item's change since an earlier scan: status added, removed, changed, unchanged or moved (with where from/to). By default compares the latest scan containing the path with the previous saved scan of the same location. Every item can be listed: results come in pages, `total` counts all items and `next_offset` fetches the next page.",
             json!({
                 "path": {"type": "string", "description": "Folder to list. Defaults to the scan's root. Absolute (~ allowed) or relative to the scan's root."},
                 "scan": scan(),
                 "compare_to": scan_prop("Scan to compare with: an id, \"previous\" (default: the saved scan before `scan`), \"latest\", or \"none\" for no comparison.", true),
                 "limit": limit_prop(50, 500),
+                "offset": offset_prop(),
             }),
             &[],
             true,
@@ -774,11 +863,12 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "largest_files",
             "Largest files",
-            "The largest individual files under a folder in one scan, biggest first.",
+            "The largest individual files under a folder in one scan, biggest first. Page further with `next_offset`.",
             json!({
                 "path": {"type": "string", "description": format!("{PATH} Defaults to the scan's root.")},
                 "scan": scan(),
-                "limit": limit_prop(25, 200),
+                "limit": limit_prop(25, 500),
+                "offset": offset_prop(),
             }),
             &[],
             true,
@@ -787,20 +877,21 @@ pub fn definitions() -> Vec<Value> {
             "largest_folders",
             "Largest folders",
             "The largest folders anywhere in a scan, biggest first. A folder that is almost entirely one subfolder is skipped in favour of that subfolder, so the list is not a chain of parents.",
-            json!({ "scan": scan(), "limit": limit_prop(25, 200) }),
+            json!({ "scan": scan(), "limit": limit_prop(25, 500) }),
             &[],
             true,
         ),
         tool(
             "what_changed",
             "What changed",
-            "What grew, shrank, appeared, disappeared or moved between two scans: totals (added, removed, moved bytes) and the biggest individual changes, folders that appeared or vanished as a whole reported once. Moves are told apart from real growth. Defaults: `to` is the latest scan, `from` the previous saved scan of the same location. Pass `path` to look only under one folder.",
+            "What grew, shrank, appeared, disappeared or moved between two scans: totals (added, removed, moved bytes) and the biggest individual changes, folders that appeared or vanished as a whole reported once. Moves are told apart from real growth. Defaults: `to` is the latest scan, `from` the previous saved scan of the same location. Pass `path` to look only under one folder, `min_size: 0` to include every change however small, and `next_offset` to page through all of them.",
             json!({
                 "from": scan_prop("Earlier scan: an id or \"previous\" (default).", false),
                 "to": scan_prop("Later scan: an id, \"latest\" (default) or \"previous\".", false),
                 "path": {"type": "string", "description": format!("Only changes under this folder. {PATH}")},
-                "min_size": {"type": "integer", "minimum": 0, "description": "Smallest change in bytes to list (default scales with the scan: 0.5% of it, 1 MB to 50 MB)."},
-                "limit": limit_prop(30, 200),
+                "min_size": {"type": "integer", "minimum": 0, "description": "Smallest change in bytes to list (default scales with the scan: 0.5% of it, 1 MB to 50 MB; 0 lists every change)."},
+                "limit": limit_prop(30, 500),
+                "offset": offset_prop(),
             }),
             &[],
             true,
@@ -820,9 +911,24 @@ pub fn definitions() -> Vec<Value> {
             json!({
                 "path": {"type": "string", "description": PATH},
                 "scan": scan_prop("Last scan to include: an id or \"latest\" (default).", false),
-                "limit": limit_prop(30, 200),
+                "limit": limit_prop(30, 500),
             }),
             &["path"],
+            true,
+        ),
+        tool(
+            "list_files",
+            "List all files",
+            "Every folder and file under a folder in one scan, at any depth, with its size: the raw contents of the scan, not a summary. Depth first in name order (a folder right before its contents). Comes in pages: `total` counts every match and `next_offset` fetches the next page, so a whole scan can be read. Filter with `kind` and `min_size`.",
+            json!({
+                "path": {"type": "string", "description": format!("{PATH} Defaults to the scan's root.")},
+                "scan": scan(),
+                "kind": {"type": "string", "enum": ["all", "files", "folders"], "description": "Which entries: \"all\" (default), \"files\" or \"folders\"."},
+                "min_size": {"type": "integer", "minimum": 0, "description": "Only entries of at least this many bytes (default 0)."},
+                "limit": limit_prop(500, 1000),
+                "offset": offset_prop(),
+            }),
+            &[],
             true,
         ),
         tool(

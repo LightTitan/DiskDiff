@@ -4,6 +4,7 @@
 //! Nothing here deletes or moves files; the only tool that writes anything
 //! is `run_scan`, and it only adds a scan to the store.
 
+pub mod export;
 pub mod format;
 pub mod protocol;
 pub mod report;
