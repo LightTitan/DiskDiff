@@ -163,16 +163,14 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: DiskDiff v${{ needs.version.outputs.version }}
           body: |
-            See the assets below to download DiskDiff.
+            ### Downloads
 
             | Download | Status |
             |---|---|
             | `DiskDiff_${{ needs.version.outputs.version }}_universal.dmg` (macOS) | Tested |
-            | `DiskDiff_${{ needs.version.outputs.version }}_x64-setup.exe` (Windows installer) | **Untested**: built automatically but not yet tried on a real PC |
-            | `DiskDiff_${{ needs.version.outputs.version }}_amd64.AppImage` (Linux, any distribution) | **Untested**: built automatically but not yet tried on a real PC |
-            | `DiskDiff_${{ needs.version.outputs.version }}_amd64.deb` (Ubuntu, Debian) | **Untested**: built automatically but not yet tried on a real PC |
-
-            Windows and Linux support is new. Please report anything that doesn't work in an issue.
+            | `DiskDiff_${{ needs.version.outputs.version }}_x64-setup.exe` (Windows) | **Untested** |
+            | `DiskDiff_${{ needs.version.outputs.version }}_amd64.AppImage` (Linux) | **Untested** |
+            | `DiskDiff_${{ needs.version.outputs.version }}_amd64.deb` (Ubuntu, Debian) | **Untested** |
           draft: true
           files: |
             dist/DiskDiff_${{ needs.version.outputs.version }}_universal.dmg
